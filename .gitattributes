@@ -1,0 +1,13 @@
+# 一律按 LF 入库，且 checkout 时也写 LF —— 不依赖各人机器的 core.autocrlf。
+# 否则 Windows 上（autocrlf=true）本地工作区是 CRLF，被脚本原样上传后远程就成了
+# 混合行尾：同一个文件在不同机器上 diff 出「整篇都改了」，一查全是 \r。
+* text=auto eol=lf
+
+# 二进制，别碰
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff2 binary
+*.zip binary
