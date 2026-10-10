@@ -1,0 +1,28 @@
+# ---- 运行时数据（本地生成，不进仓库）----
+cache/
+*.log
+tmp_*.js
+.tmp_*
+
+# ---- 归档产物（旧的独立单票页、旧版工作台、验证截图）----
+archive/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ---- 本地凭据（绝不入库）----
+.wb-gh-netrc
+*.token
+github_token.txt
+
+# ---- 本地工作笔记（项目记忆，不进公开仓）----
+.workbuddy/

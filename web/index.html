@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>缠论全市场工作台</title>
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+
+<div class="wrap">
+  <header class="hd">
+    <div>
+      <h1>缠论全市场工作台</h1>
+      <div class="sub" id="sub">正在载入…</div>
+    </div>
+    <div class="hd-act">
+      <span class="scanst" id="scanSt"></span>
+      <button class="btn primary" id="btnScan">重新扫描</button>
+    </div>
+  </header>
+
+  <div class="stats" id="stats"></div>
+
+  <div class="panel">
+    <div class="tabs" id="tabs"></div>
+    <div class="row">
+      <div class="fld">
+        <label for="fresh">信号新鲜度</label>
+        <select id="fresh">
+          <option value="0">仅当日</option>
+          <option value="1">近 2 日</option>
+          <option value="2">近 3 日</option>
+          <option value="4">近 5 日</option>
+          <option value="99">不限</option>
+        </select>
+      </div>
+      <div class="fld">
+        <label for="amt">成交额 ≥</label>
+        <select id="amt">
+          <option value="0">不限</option>
+          <option value="1">1 亿</option>
+          <option value="3">3 亿</option>
+          <option value="5">5 亿</option>
+          <option value="10">10 亿</option>
+          <option value="20">20 亿</option>
+          <option value="50">50 亿</option>
+        </select>
+      </div>
+      <div class="fld">
+        <label for="ind">行业</label>
+        <select id="ind"><option value="">全部行业</option></select>
+      </div>
+      <div class="fld">
+        <label for="q">搜索</label>
+        <input type="text" id="q" placeholder="代码 / 名称" style="width:130px">
+      </div>
+      <label class="chk"><input type="checkbox" id="validOnly" checked>仅未失效</label>
+      <label class="chk"><input type="checkbox" id="exclST" checked>排除 ST</label>
+      <label class="chk"><input type="checkbox" id="exclBJ">排除北交所</label>
+      <label class="chk"><input type="checkbox" id="trendOnly">仅趋势背驰</label>
+      <button class="btn" id="reset">重置</button>
+    </div>
+    <div class="hint" id="hint"></div>
+  </div>
+
+  <div class="panel" style="padding:0">
+    <div class="tablewrap">
+      <table>
+        <thead><tr>
+          <th class="sortable" data-s="c">代码</th>
+          <th class="sortable" data-s="n">名称</th>
+          <th class="sortable" data-s="i">行业</th>
+          <th>信号</th>
+          <th class="sortable" data-s="d">信号日</th>
+          <th class="sortable" data-s="fr">新鲜度</th>
+          <th class="num sortable" data-s="st">关键位</th>
+          <th class="num sortable" data-s="p">现价</th>
+          <th class="num sortable" data-s="a">成交额(亿)</th>
+        </tr></thead>
+        <tbody id="tb"></tbody>
+      </table>
+      <div class="empty" id="empty" style="display:none">当前收缩条件下没有匹配的个股</div>
+    </div>
+  </div>
+
+  <footer id="foot"></footer>
+</div>
+
+<!-- 个股抽屉：点榜单名称滑出，不跳转、不丢筛选状态 -->
+<aside class="drawer" id="drawer" aria-hidden="true">
+  <div class="dw-head">
+    <div class="dw-title">
+      <span id="dwName">—</span>
+      <span class="dw-code" id="dwCode"></span>
+      <span class="dw-ind" id="dwInd"></span>
+    </div>
+    <button class="dw-close" id="dwClose" title="关闭（Esc）">✕</button>
+  </div>
+  <div class="dw-body" id="dwBody">
+    <div class="dw-meta" id="dwMeta"></div>
+    <div class="dw-freq" id="dwFreq">
+      <button data-freq="day" class="on">日线</button>
+      <button data-freq="m60">60 分钟</button>
+      <button data-freq="m30">30 分钟</button>
+      <button class="dw-zm" id="dwZoom" title="放大 K 线（也可双击图表）">⛶ 放大</button>
+    </div>
+    <div class="dw-layers" id="dwLayers"></div>
+    <div class="cw dw-cw"><canvas id="mcv"></canvas><div id="tip"></div></div>
+    <div class="dw-hint">
+      悬停 / 点按 K 线看该根的 OHLC；勾选框 = 图层开关。切换周期会实时拉该级别数据并重算结构与买卖点。
+      点「⛶ 放大」或双击图表可在整屏里缩放、平移着看细节。
+    </div>
+    <!-- 信号卡片区固定在**图的下方**（与技能单票页一致：先看结构、再看理由）——
+         放到图上面的话，一只票十几张卡，点开要先滚过理由才看得到图。 -->
+    <div id="dwCard"></div>
+    <details class="dw-report" id="dwReportBox">
+      <summary>文字报告（笔序列 / 中枢 / MACD / 均线）</summary>
+      <pre id="dwReport"></pre>
+    </details>
+  </div>
+</aside>
+
+<!-- K 线放大视图：把抽屉里那张图放到整屏，滚轮 / 双指缩放、拖动平移。
+     独立成一层而不是"把抽屉画布画大"——抽屉宽度受榜单挤压，250 根挤在 1000px 里
+     一根不到 4px，笔的折点和中枢边界全糊在一起。 -->
+<div class="zoom" id="zoom" aria-hidden="true">
+  <div class="zm-box">
+    <div class="zm-head">
+      <div class="zm-title"><span id="zmTitle">—</span><span class="zm-tag">放大视图</span></div>
+      <div class="zm-act">
+        <span class="zm-range" id="zmRange"></span>
+        <button class="btn" id="zmMore" style="display:none"></button>
+        <button class="btn" id="zmLast">最新</button>
+        <button class="btn" id="zmIn">＋ 放大</button>
+        <button class="btn" id="zmOut">－ 缩小</button>
+        <button class="btn" id="zmReset">复位</button>
+        <button class="dw-close" id="zmClose" title="关闭（Esc）">✕</button>
+      </div>
+    </div>
+    <div class="zm-bar">
+      <span class="zm-lab">范围</span>
+      <span class="zm-presets" id="zmPresets"></span>
+      <span class="zm-lab" style="margin-left:12px">图层</span>
+      <span class="zm-layers" id="zmLayers"></span>
+    </div>
+    <div class="zm-cw" id="zmCw"><div id="zmTip"></div></div>
+    <div class="zm-foot">
+      滚轮 / 双指缩放 · 按住拖动平移 · 双击以该处为中心放大（已到最小则复位）·
+      键盘 <code>+</code><code>-</code> 缩放、<code>←</code><code>→</code> 平移、<code>0</code> 复位、<code>Esc</code> 关闭。
+      图上 1/2/3 = 一/二/三类，紫买青卖，与抽屉里的判据卡片同源。
+    </div>
+  </div>
+</div>
+
+<script src="vendor/kline_canvas.js"></script>
+<script src="js/api.js"></script>
+<script src="js/app.js"></script>
+<script src="js/drawer.js"></script>
+<script src="js/zoom.js"></script>
+</body>
+</html>
