@@ -35,7 +35,7 @@ MIN_SUCCESS_RATIO = 0.95
 LOG = logging.getLogger(__name__)
 
 
-def validate_options(limit=0, workers=20, freq="day", count=800, lookback=5):
+def validate_options(limit=0, workers=32, freq="day", count=800, lookback=5):
     return {"limit": integer(limit, "limit", 0, 10000),
             "workers": integer(workers, "workers", 1, 32),
             "freq": DS.validate_freq(freq),
@@ -78,7 +78,7 @@ def scan_one(item, freq="day", count=800, lookback=5, cache_kline=True):
     }
 
 
-def run_scan(limit=0, freq="day", count=800, lookback=5, workers=20,
+def run_scan(limit=0, freq="day", count=800, lookback=5, workers=32,
              progress=None, cache_kline=True):
     """Publish only after coverage validation; failures have a separate diagnostic file."""
     options = validate_options(limit, workers, freq, count, lookback)
@@ -204,8 +204,8 @@ def main():
     ap.add_argument("--freq", default="day", choices=list(DS.SCALE))
     ap.add_argument("--count", type=int, default=800)
     ap.add_argument("--lookback", type=int, default=5)
-    ap.add_argument("--workers", type=int, default=20,
-                    help="并发数；20 是全市场实测最快且未触发封禁的值（10 约慢一倍）")
+    ap.add_argument("--workers", type=int, default=32,
+                    help="并发数，默认 32，可选 1～32")
     ap.add_argument("--no-kline-cache", action="store_true", help="不落盘日 K 缓存")
     a = ap.parse_args()
 

@@ -149,7 +149,7 @@ def stock_payload(code, freq="day", lookback=250, with_report=False):
 
 
 # ---------------------------------------------------------------- 扫描任务
-def start_scan(limit=0, workers=20, freq="day", count=800, lookback=5):
+def start_scan(limit=0, workers=32, freq="day", count=800, lookback=5):
     import scan as SC
     options = SC.validate_options(limit, workers, freq, count, lookback)
     with JOB_LOCK:
