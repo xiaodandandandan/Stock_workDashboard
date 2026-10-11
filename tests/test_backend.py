@@ -9,6 +9,7 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
+from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch
 
 from fake_engine import install
@@ -195,6 +196,73 @@ class BackendTests(unittest.TestCase):
             return json.dumps([dict(symbol="sh600000", name="A", code="600000")])
         with patch.object(ds, "_get", side_effect=fetch), self.assertRaises(ds.MarketListError):
             ds.market_list(pages=2, num=100)
+
+    def test_industry_filters_market_and_preserves_exchange_across_pages(self):
+        rows = [dict(SECUCODE="000001.SZ", SECURITY_CODE="000001", EM2016="金融-银行"),
+                dict(SECUCODE="600000.SH", SECURITY_CODE="600000", EM2016="金融-银行"),
+                dict(SECUCODE="AAPL.US", SECURITY_CODE="AAPL", EM2016="信息技术-硬件"),
+                dict(SECUCODE="920403.BJ", SECURITY_CODE="920403", EM2016="农林牧渔-农业")]
+        requested = []
+        def fetch(url, *args):
+            qs = parse_qs(urlparse(url).query)
+            self.assertEqual(qs["filter"], ['(SECURITY_TYPE="A股")(LISTING_STATE="0")'])
+            self.assertIn("SECUCODE", qs["columns"][0])
+            self.assertEqual(qs["sortColumns"], ["SECUCODE"])
+            p = int(qs["pageNumber"][0])
+            requested.append(p)
+            return json.dumps(dict(success=True, result=dict(pages=2, count=4, data=rows[(p - 1)*2:p*2])))
+        with patch.object(ds, "_get", side_effect=fetch):
+            mapping = ds.industry_map(size=2)
+        self.assertEqual(set(mapping), {"sz000001", "sh600000", "bj920403"})
+        self.assertEqual(mapping["bj920403"]["l1"], "农林牧渔")
+        self.assertEqual(sorted(requested), [1, 2])
+
+    def test_industry_rejects_business_errors_and_truncated_pagination(self):
+        row = dict(SECUCODE="000001.SZ", SECURITY_CODE="000001", EM2016="金融-银行")
+        for response in (dict(success=False, message="服务不可用", result=None),
+                         dict(success=True, result=dict(pages=1, count=2, data=[row]))):
+            with self.subTest(response=response), patch.object(ds, "_get", return_value=json.dumps(response)), \
+                 self.assertRaises(ds.IndustryError):
+                ds.industry_map()
+        first = json.dumps(dict(success=True, result=dict(pages=2, count=2, data=[row])))
+        with patch.object(ds, "_get", side_effect=[first, TimeoutError("page 2")]), \
+             self.assertRaisesRegex(ds.IndustryError, "第 2 页"):
+            ds.industry_map(size=1)
+        with patch.object(ds, "_get", return_value=first), self.assertRaises(ds.IndustryError):
+            ds.industry_map(pages=1, size=1)
+
+    def test_industry_failure_does_not_poison_process_cache(self):
+        mapping = {"sh600000": dict(l1="金融", full="金融-银行")}
+        with patch.object(server, "_IND", None), \
+             patch.object(ds, "industry_map", side_effect=[ds.IndustryError("offline"), {}, mapping]) as fetch:
+            self.assertEqual(server.industry_lookup(), {})
+            self.assertEqual(server.industry_lookup(), {})
+            self.assertEqual(server.industry_lookup(), mapping)
+            self.assertEqual(server.industry_lookup(), mapping)
+            self.assertEqual(fetch.call_count, 3)
+
+    def test_scan_records_industry_failure_and_partial_coverage(self):
+        item = dict(symbol="sh600000", code="600000", name="A", buy=[], sell=[])
+        other = dict(item, symbol="sz000001", code="000001", name="B")
+        for fail in (False, True):
+            with self.subTest(fail=fail), patch.object(ds, "market_list", return_value=[item, other]), \
+                 patch.object(scan, "scan_one", side_effect=lambda x, *a: dict(x)), \
+                 patch.object(ds, "industry_map", side_effect=ds.IndustryError("offline") if fail else None,
+                              return_value={"sh600000": dict(l1="金融", full="金融-银行")}):
+                result = scan.run_scan(workers=1)
+            status = result["industry_status"]
+            self.assertEqual(status["status"], "failed" if fail else "partial")
+            self.assertEqual(status["matched"], 0 if fail else 1)
+            self.assertEqual(status["missing"], 2 if fail else 1)
+            self.assertEqual(store.load_scan_attempt()["industry_status"], status)
+            self.assertEqual(result["errors"], 0)  # K-line/engine status remains separate.
+
+    def test_stock_refreshes_industry_when_saved_row_is_unclassified(self):
+        store.save_scan(dict(rows=[dict(symbol="sh600000", code="600000", name="A", industry="未分类")]))
+        store.save_kline("day", "sh600000", bars())
+        with patch.object(server, "industry_lookup", return_value={"sh600000": dict(l1="金融", full="金融-银行")}):
+            result = server.stock_payload("sh600000")
+        self.assertEqual(result["industry"], "金融")
 
     def test_market_page_limit_requires_end_of_market(self):
         with patch.object(ds, "_get", return_value='[{"symbol":"sh600000","name":"A"}]'), \

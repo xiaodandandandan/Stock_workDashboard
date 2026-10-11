@@ -79,10 +79,12 @@ def industry_lookup():
         with _IND_LOCK:
             if _IND is None:
                 try:
-                    _IND = DS.industry_map()
+                    mapping = DS.industry_map()
+                    if mapping:
+                        _IND = mapping
                 except Exception:                            # noqa: BLE001
-                    _IND = {}
-    return _IND
+                    LOG.warning("行业查询失败，下次请求会重试", exc_info=True)
+    return _IND or {}
 
 
 def scan_meta():
@@ -126,7 +128,7 @@ def stock_payload(code, freq="day", lookback=250, with_report=False):
     name = row.get("name") or DS.quote_name(sym)
     ind = row.get("industry")
     ind_full = row.get("industry_full")
-    if not ind:
+    if not ind or ind == "未分类":
         m = industry_lookup().get(sym) or {}
         ind, ind_full = m.get("l1", "未分类"), m.get("full", "未分类")
 
@@ -168,6 +170,7 @@ def start_scan(limit=0, workers=20, freq="day", count=800, lookback=5):
                 JOB.update({"result": {"hit": p["hit"], "total": p["total_scanned"],
                                        "elapsed": p["elapsed"],
                                        "errors": p["errors"], "complete": p["complete"],
+                                       "industry_status": p["industry_status"],
                                        "generated": p["generated"]}})
         except Exception as e:                               # noqa: BLE001
             with JOB_LOCK:

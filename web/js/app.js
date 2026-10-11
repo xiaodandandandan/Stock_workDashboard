@@ -191,6 +191,8 @@ function renderStats(t) {
   document.getElementById('sub').textContent =
     `数据时间 ${D.generated}　·　${D.freq || 'day'} ${D.count || 800} 根　·　扫描耗时 ${D.elapsed}s` +
     (D.errors ? `　·　⚠ ${D.errors} 只分析失败，榜单不完整` : '') +
+    (D.industry_status?.status === 'failed' ? '　·　⚠ 行业获取失败，请重新扫描' :
+      (D.industry_status?.missing ? `　·　⚠ ${D.industry_status.missing} 只缺少行业分类` : '')) +
     `　·　新鲜度回溯窗口 ${LB} 根　·　买点 chanlun_core.detect()　卖点严格镜像`;
 }
 
@@ -329,8 +331,11 @@ function pollScan() {
     document.getElementById('btnScan').disabled = false;
     if (j.error) { setScanSt('扫描失败：' + j.error, true); return; }
     const result = j.result || {};
+    const industryWarning = result.industry_status?.status === 'failed' ? ' · 行业获取失败，请重试' :
+      (result.industry_status?.missing ? ` · ${result.industry_status.missing} 只缺少行业分类` : '');
     setScanSt(`扫描完成：命中 ${result.hit} 只 · ${result.elapsed}s` +
-      (result.errors ? ` · ${result.errors} 只失败，结果不完整` : ''), !!result.errors);
+      (result.errors ? ` · ${result.errors} 只失败，结果不完整` : '') + industryWarning,
+      !!result.errors || !!industryWarning);
     await boot(true);
   }, 900);
 }

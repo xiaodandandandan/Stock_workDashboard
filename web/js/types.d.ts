@@ -35,9 +35,13 @@ interface ScanRow extends StockRef {
 interface ScanPayload {
   rows: ScanRow[]; generated: string; hit: number; total_scanned: number; elapsed: number;
   lookback: number; count: number; freq: Frequency; errors: number; complete: boolean;
+  industry_status?: IndustryStatus;
+}
+interface IndustryStatus {
+  status: 'ok' | 'partial' | 'failed'; matched: number; missing: number; total: number; error: string;
 }
 interface ScanOptions { limit?: number; workers?: number; freq?: Frequency; count?: number; lookback?: number }
 interface ScanStatus {
   running: boolean; stage: string; done: number; total: number; msg: string; error: string;
-  result: { hit: number; elapsed: number; errors: number; complete: boolean } | null;
+  result: { hit: number; elapsed: number; errors: number; complete: boolean; industry_status?: IndustryStatus } | null;
 }

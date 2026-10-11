@@ -15,10 +15,12 @@
 """
 import json
 import logging
+import re
 import ssl
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlencode
 
 from . import SKILLS  # noqa: F401  （保持包初始化顺序：技能路径先注入）
 from .validation import InputError, integer, market_prefix, to_symbol
@@ -138,33 +140,68 @@ def market_list(node="hs_a", pages=60, num=100, timeout=25):
     return out
 
 
+class IndustryError(RuntimeError):
+    pass
+
+
 def industry_map(pages=50, size=500):
-    """东财全市场行业归属 → {code: {'name','l1','full'}}（并发，一次拉全量）。"""
+    """在市 A 股行业 → {symbol: {'name','l1','full'}}，按服务端分页数获取。"""
     from concurrent.futures import ThreadPoolExecutor
 
     def one(p):
-        u = ("https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_F10_ORG_BASICINFO"
-             "&columns=SECURITY_CODE,SECURITY_NAME_ABBR,EM2016&pageSize=%d&pageNumber=%d" % (size, p))
+        params = {"reportName": "RPT_F10_ORG_BASICINFO",
+                  "columns": "SECUCODE,SECURITY_CODE,SECURITY_NAME_ABBR,EM2016",
+                  "filter": '(SECURITY_TYPE="A股")(LISTING_STATE="0")',
+                  "sortColumns": "SECUCODE", "sortTypes": 1,
+                  "pageSize": size, "pageNumber": p}
+        u = "https://datacenter-web.eastmoney.com/api/data/v1/get?" + urlencode(params)
         try:
             j = json.loads(_get(u, HDR_EM))
-            return ((j.get("result") or {}).get("data") or [])
-        except Exception:
-            LOG.warning("行业第 %d 页获取失败", p, exc_info=True)
-            return []
+            if not isinstance(j, dict) or j.get("success") is not True:
+                raise ValueError(j.get("message", "接口响应无效") if isinstance(j, dict) else "接口响应无效")
+            result = j.get("result")
+            if not isinstance(result, dict) or not isinstance(result.get("data"), list):
+                raise ValueError("缺少行业列表")
+            if (type(result.get("pages")) is not int or type(result.get("count")) is not int
+                    or result["pages"] < 1 or result["count"] < 1):
+                raise ValueError("行业分页信息无效或列表为空")
+            return result
+        except Exception as exc:
+            raise IndustryError("行业第 %d 页获取失败：%s" % (p, exc)) from exc
 
-    rows = []
+    first = one(1)
+    total_pages, count = first["pages"], first["count"]
+    if total_pages > pages or total_pages != (count + size - 1) // size:
+        raise IndustryError("行业列表超出分页上限或分页信息不一致")
+    rows = list(first["data"])
     with ThreadPoolExecutor(max_workers=10) as ex:
-        for r in ex.map(one, range(1, pages + 1)):
-            rows += r
+        for result in ex.map(one, range(2, total_pages + 1)):
+            if result["pages"] != total_pages or result["count"] != count:
+                raise IndustryError("行业列表在分页期间发生变化，请重试")
+            rows.extend(result["data"])
+    if len(rows) != count:
+        raise IndustryError("行业列表不完整：收到 %d / %d 条" % (len(rows), count))
     mp = {}
     for x in rows:
-        code = x.get("SECURITY_CODE")
-        if not code:
+        if not isinstance(x, dict):
+            LOG.warning("跳过格式无效的行业记录")
             continue
-        full = x.get("EM2016") or ""
-        mp[to_symbol(code)] = {"name": x.get("SECURITY_NAME_ABBR") or "",
-                    "l1": full.split("-")[0] if full else "未分类",
-                    "full": full or "未分类"}
+        # The unfiltered report also contains overseas/delisted securities. Never
+        # infer their exchange from a bare code, or let one unsupported row erase A shares.
+        match = re.fullmatch(r"([0-9]{6})\.(SH|SZ|BJ)", str(x.get("SECUCODE", "")))
+        if not match or x.get("SECURITY_CODE") != match[1]:
+            LOG.warning("跳过非 A 股或标识不一致的行业记录: %s", x.get("SECUCODE"))
+            continue
+        symbol = to_symbol(match[2].lower() + match[1])
+        full = str(x.get("EM2016") or "").strip()
+        if not full or not full.split("-")[0].strip():
+            continue
+        if symbol in mp:
+            raise IndustryError("行业列表包含重复标的：%s" % symbol)
+        mp[symbol] = {"name": x.get("SECURITY_NAME_ABBR") or "",
+                      "l1": full.split("-")[0].strip(), "full": full}
+    if not mp:
+        raise IndustryError("行业接口未返回可用的 A 股分类")
     return mp
 
 

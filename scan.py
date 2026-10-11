@@ -147,14 +147,25 @@ def _run_scan(limit, freq, count, lookback, workers, progress, cache_kline, atte
 
     say("industry", 0, 0, "挂行业…")
     t2 = time.perf_counter()
+    industry_error = ""
     try:
         ind = DS.industry_map()
-    except Exception:                                        # noqa: BLE001
+        if not ind:
+            raise DS.IndustryError("行业映射为空")
+    except Exception as exc:                                 # noqa: BLE001
+        LOG.exception("行业获取失败，榜单将明确标记行业缺失")
+        industry_error = "%s: %s" % (type(exc).__name__, exc)
         ind = {}
+    matched = 0
     for r in rows:
         m = ind.get(r["symbol"]) or {}
         r["industry"] = m.get("l1", "未分类")
         r["industry_full"] = m.get("full", "未分类")
+        matched += r["industry"] != "未分类"
+    industry_status = {"status": "failed" if industry_error else ("ok" if matched == len(rows) else "partial"),
+                       "matched": matched, "missing": len(rows) - matched, "total": len(rows),
+                       "error": industry_error}
+    attempt["industry_status"] = industry_status
     say("industry", 0, 0, "行业 %d 条（%.1fs）" % (len(ind), time.perf_counter() - t2))
 
     payload = {
@@ -162,6 +173,7 @@ def _run_scan(limit, freq, count, lookback, workers, progress, cache_kline, atte
         "freq": freq, "count": count, "lookback": lookback,
         "total_scanned": len(lst), "hit": len(rows), "errors": errs,
         "complete": errs == 0, "skipped": attempt["skipped"],
+        "industry_status": industry_status,
         "engine": engine_identity(E.K),
         "source": DS.PROVENANCE,
         "elapsed": round(time.perf_counter() - t0, 1),

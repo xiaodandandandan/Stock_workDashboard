@@ -83,6 +83,30 @@ test('loading another stock clears the old canvas snapshot and disables zoom', a
   assert.equal(e.Drawer.snapshot().symbol, 'sh600001');
 });
 
+test('drawer replaces stale unclassified label with fetched industry', async () => {
+  const e = environment();
+  e.Drawer.open({ code: '600000', industry: '未分类' });
+  e.pending.shift().resolve({ ...payload(), industry: '金融' }); await tick();
+  assert.equal(e.el('dwInd').textContent, '金融');
+});
+
+test('scan header exposes failed and partial industry data', () => {
+  const elements = new Map();
+  const el = id => {
+    if (!elements.has(id)) elements.set(id, { innerHTML: '', textContent: '' });
+    return elements.get(id);
+  };
+  const ctx = vm.createContext({ console, document: { getElementById: el },
+    API: { scan: () => new Promise(() => {}) } });
+  vm.runInContext(read('js/app.js'), ctx);
+  vm.runInContext("D.industry_status = { status: 'failed', missing: 4 }; renderStats({ typeCnt: {} });", ctx);
+  assert.match(el('sub').textContent, /行业获取失败/);
+  vm.runInContext("D.industry_status = { status: 'partial', missing: 2 }; renderStats({ typeCnt: {} });", ctx);
+  assert.match(el('sub').textContent, /2 只缺少行业分类/);
+  vm.runInContext("D.industry_status = { status: 'ok', missing: 0 }; renderStats({ typeCnt: {} });", ctx);
+  assert.doesNotMatch(el('sub').textContent, /行业获取失败|缺少行业分类/);
+});
+
 test('closing the drawer rejects a late response even if transport ignores abort', async () => {
   const e = environment();
   e.Drawer.open({ code: '600000' }); const pending = e.pending.shift();

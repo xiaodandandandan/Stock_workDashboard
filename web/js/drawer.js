@@ -110,6 +110,7 @@ const Drawer = (() => {
   /* ---------------- 渲染 ---------------- */
   function render(d) {
     // 头部信息
+    el('dwInd').textContent = d.industry || '';
     const st = d.structure || {};
     el('dwMeta').innerHTML =
       `现价 <b>${d.close != null ? (+d.close).toFixed(2) : '—'}</b>` +
