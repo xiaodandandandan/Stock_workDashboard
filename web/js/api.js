@@ -1,40 +1,83 @@
-/* 后端调用的唯一出口。
- *
- * 为什么要单独一层：端口、超时、错误文案、要加的鉴权/埋点，都属于「基础设施」，
- * 散在各个组件里迟早不一致。新组件只准从这里发请求。
- */
+// @ts-check
+/* Typed boundary; classic scripts and Python-only deployment are retained. */
+class ApiError extends Error {
+  /** @param {string} message @param {number} status */
+  constructor(message, status) { super(message); this.status = status; }
+}
+
+/** @param {unknown} value @returns {value is Record<string, unknown>} */
+function isRecord(value) { return value !== null && typeof value === 'object' && !Array.isArray(value); }
+
+/** @param {unknown} value @returns {StockPayload} */
+function readStockPayload(value) {
+  if (!isRecord(value) || typeof value.symbol !== 'string' || typeof value.freq !== 'string' ||
+      !isRecord(value.chart) || !isRecord(value.chart.pack) || !Array.isArray(value.chart.dates) ||
+      !Array.isArray(value.chart.hist) || !isRecord(value.signals) ||
+      !Array.isArray(value.signals.buy) || !Array.isArray(value.signals.sell)) {
+    throw new Error('个股接口返回数据不完整');
+  }
+  const pack = value.chart.pack;
+  if (typeof pack.n !== 'number' || !Number.isInteger(pack.n) || pack.n <= 0 ||
+      value.chart.dates.length < pack.n ||
+      ['o', 'h', 'l', 'c', 'v'].some(k => !Array.isArray(pack[k]) || pack[k].length !== pack.n ||
+        !pack[k].every(x => typeof x === 'number' && Number.isFinite(x)))) {
+    throw new Error('K 线数组长度或数值不正确');
+  }
+  return /** @type {StockPayload} */ (/** @type {unknown} */ (value));
+}
+
 const API = {
-  base: '',                       // 同源部署（server.py 既托管页面也提供接口）
+  base: '',
 
-  async get(path, params) {
-    const u = new URL(path, location.origin);
-    Object.entries(params || {}).forEach(([k, v]) => {
-      if (v !== undefined && v !== null) u.searchParams.set(k, v);
-    });
-    const r = await fetch(u, { cache: 'no-store' });
-    if (!r.ok) {
-      let msg = 'HTTP ' + r.status;
-      try { msg = (await r.json()).error || msg; } catch (e) { /* 非 JSON 错误体 */ }
-      const err = new Error(msg);
-      err.status = r.status;
-      throw err;
+  /** @param {string} path
+   * @param {Record<string, string | number | boolean | undefined>} [params]
+   * @param {RequestInit} [init]
+   * @returns {Promise<unknown>}
+   */
+  async request(path, params = {}, init = {}) {
+    const u = new URL(this.base + path, location.origin);
+    Object.entries(params).forEach(([k, v]) => { if (v !== undefined) u.searchParams.set(k, String(v)); });
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    if (init.signal?.aborted) abort();
+    else init.signal?.addEventListener('abort', abort, { once: true });
+    const timer = setTimeout(abort, 90000);
+    try {
+      const r = await fetch(u, { ...init, cache: 'no-store', signal: controller.signal });
+      /** @type {unknown} */
+      const body = await r.json().catch(() => null);
+      if (!r.ok) throw new ApiError(isRecord(body) && typeof body.error === 'string' ? body.error : 'HTTP ' + r.status, r.status);
+      if (body === null) throw new Error('接口没有返回 JSON 数据');
+      return body;
+    } finally {
+      clearTimeout(timer);
+      init.signal?.removeEventListener('abort', abort);
     }
-    return r.json();
   },
 
-  health() { return this.get('/api/health'); },
-  scan() { return this.get('/api/scan'); },
-  scanStatus() { return this.get('/api/scan/status'); },
-  stock(code, freq, opts) {
-    return this.get('/api/stock', Object.assign({ code, freq }, opts || {}));
+  health() { return this.request('/api/health'); },
+  /** @returns {Promise<ScanPayload>} */
+  async scan() {
+    const body = await this.request('/api/scan');
+    if (!isRecord(body) || !Array.isArray(body.rows)) throw new Error('榜单数据不完整');
+    return /** @type {ScanPayload} */ (/** @type {unknown} */ (body));
   },
-
-  async runScan(body) {
-    const r = await fetch(this.base + '/api/scan', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body || {}),
-    });
-    return r.json();
+  /** @returns {Promise<ScanStatus>} */
+  async scanStatus() { return /** @type {ScanStatus} */ (await this.request('/api/scan/status')); },
+  /** @param {string} code @param {Frequency} freq
+   * @param {{lookback?: number, report?: 0 | 1}} [opts]
+   * @param {AbortSignal} [signal] @returns {Promise<StockPayload>}
+   */
+  async stock(code, freq, opts = {}, signal) {
+    const symbol = normalizeSymbol(code);
+    const data = readStockPayload(await this.request('/api/stock', { ...opts, code: symbol, freq }, { signal }));
+    if (data.symbol !== symbol || data.freq !== freq) throw new Error('返回的股票或周期与请求不一致');
+    return data;
+  },
+  /** @param {ScanOptions} [body] @returns {Promise<{started: boolean, reason: string}>} */
+  async runScan(body = {}) {
+    return /** @type {{started: boolean, reason: string}} */ (await this.request('/api/scan', {}, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    }));
   },
 };

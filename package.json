@@ -1,0 +1,10 @@
+{
+  "name": "stock-workdashboard",
+  "private": true,
+  "scripts": {
+    "test": "node --test tests/frontend.test.cjs",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "engines": { "node": ">=20" },
+  "devDependencies": { "typescript": "7.0.2" }
+}

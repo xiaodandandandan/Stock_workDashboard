@@ -11,7 +11,6 @@
 from . import require_engine
 
 K = require_engine()             # 缺失时抛带「该放哪个目录」指引的 ImportError
-import run_chanlun as R          # noqa: E402  只借它的文字报告模板（单票产物一直在用，保持一致）
 
 from . import sell as S
 
@@ -284,7 +283,10 @@ def analyze(bars, unit="日线", lookback=250, scan_lookback=5, with_report=Fals
         out["history_total"] = len(history)
     if with_report:
         try:
+            import run_chanlun as R  # optional: only the report needs this module
             out["report"] = R.report(bars, unit=unit)[0]
+        except ImportError:
+            out["report"] = "（文字报告不可用：请安装 run_chanlun.py 及其依赖；结构分析不受影响）"
         except Exception as e:                                  # noqa: BLE001
             out["report"] = "（文字报告生成失败：%s）" % e
     return out

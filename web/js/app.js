@@ -4,7 +4,9 @@
  * 之前踩过「多个入口各算一遍，数字对不上」的坑（筛选器静默失效，徽标 151 vs 提示 156）。
  */
 
-let D = { rows: [], generated: '', hit: 0, total_scanned: 0, elapsed: 0, lookback: 5 };
+/** @type {ScanPayload} */
+let D = { rows: [], generated: '', hit: 0, total_scanned: 0, elapsed: 0, lookback: 5,
+  count: 800, freq: 'day', errors: 0, complete: true };
 
 const TABS = [
   ['当日买点', 'buy3', null],
@@ -152,7 +154,7 @@ function renderTable(list) {
       return `<span class="tag ${cls}${tr}${dead}" data-type="${esc(h.type)}"` +
              ` title="只看「${esc(h.type)}」">${h.type}</span>`;
     }).join('');
-    return `<tr class="rowhit" data-code="${esc(r.code)}" title="点开看这只票的缠论结构">
+    return `<tr class="rowhit" data-symbol="${esc(r.symbol || normalizeSymbol(r.code))}" title="点开看这只票的缠论结构">
       <td class="code">${esc(r.code)}</td>
       <td class="name">${esc(r.name)}<span class="go">展开 ↗</span></td>
       <td><span class="ind">${esc(r.industry)}</span></td>
@@ -187,7 +189,8 @@ function renderStats(t) {
        <div class="v ${c}">${v}</div>
      </div>`).join('');
   document.getElementById('sub').textContent =
-    `数据时间 ${D.generated}　·　日线 ${D.count || 800} 根　·　扫描耗时 ${D.elapsed}s` +
+    `数据时间 ${D.generated}　·　${D.freq || 'day'} ${D.count || 800} 根　·　扫描耗时 ${D.elapsed}s` +
+    (D.errors ? `　·　⚠ ${D.errors} 只分析失败，榜单不完整` : '') +
     `　·　新鲜度回溯窗口 ${LB} 根　·　买点 chanlun_core.detect()　卖点严格镜像`;
 }
 
@@ -285,9 +288,9 @@ function bind() {
       if (ti >= 0) { S.tab = ti; refresh(); }
       return;
     }
-    const tr = e.target.closest('tr[data-code]'); if (!tr) return;
-    const row = D.rows.find(r => r.code === tr.dataset.code);
-    if (row) Drawer.open(row);
+    const tr = e.target.closest('tr[data-symbol]'); if (!tr) return;
+    const row = D.rows.find(r => (r.symbol || normalizeSymbol(r.code)) === tr.dataset.symbol);
+    if (row) Drawer.open(row, D.freq || 'day');
   });
   on('btnScan', 'click', startScan);
 }
@@ -304,7 +307,7 @@ async function startScan() {
   btn.disabled = true;
   try {
     const r = await API.runScan({});
-    if (!r.started) { setScanSt(r.reason || '已有扫描在跑', true); btn.disabled = false; return; }
+    if (!r.started) setScanSt(r.reason || '已有扫描在跑', true);
     pollScan();
   } catch (e) {
     setScanSt('启动失败：' + e.message, true);
@@ -325,7 +328,9 @@ function pollScan() {
     }
     document.getElementById('btnScan').disabled = false;
     if (j.error) { setScanSt('扫描失败：' + j.error, true); return; }
-    setScanSt(`扫描完成：命中 ${(j.result || {}).hit} 只 · ${(j.result || {}).elapsed}s`, false);
+    const result = j.result || {};
+    setScanSt(`扫描完成：命中 ${result.hit} 只 · ${result.elapsed}s` +
+      (result.errors ? ` · ${result.errors} 只失败，结果不完整` : ''), !!result.errors);
     await boot(true);
   }, 900);
 }
@@ -344,15 +349,24 @@ async function boot(silent) {
   // ★ bind() 无条件调用：首次使用时本来就没有扫描结果，如果这时不绑事件，
   //   「重新扫描」按钮永远点不动 —— 页面直接死锁在空状态。
   bind();
-  if (!ok) return;
-  LB = D.lookback || 5;
-  refresh();
+  if (ok) { LB = D.lookback ?? 5; refresh(); }
+  // Reconnect to an already running scan, including first launch via --scan.
+  if (!silent) {
+    try {
+      const job = await API.scanStatus();
+      if (job.running) { document.getElementById('btnScan').disabled = true; pollScan(); }
+    } catch (e) { console.warn('读取扫描状态失败', e); }
+  }
   // ?open=601138[&freq=m60] —— 直接展开某只票的抽屉（调试 / 分享具体标的时用）
   const qs = new URLSearchParams(location.search);
   const want = qs.get('open');
   if (want && !Drawer.openCode) {
-    const r = D.rows.find(x => x.code === want) || { code: want, name: '', industry: '' };
-    Drawer.open(r, qs.get('freq') || 'day');
+    try {
+      const symbol = normalizeSymbol(want);
+      const r = D.rows.find(x => (x.symbol || normalizeSymbol(x.code)) === symbol) ||
+        { code: symbol.slice(2), symbol, name: '', industry: '' };
+      Drawer.open(r, qs.get('freq') || 'day');
+    } catch (e) { setScanSt(e.message, true); }
   }
 }
 boot();

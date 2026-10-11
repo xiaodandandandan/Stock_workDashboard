@@ -14,14 +14,17 @@
     指定代码可能是 ETF / 榜外票）。
 """
 import json
+import logging
 import ssl
+import time
+import urllib.error
 import urllib.request
 
 from . import SKILLS  # noqa: F401  （保持包初始化顺序：技能路径先注入）
+from .validation import InputError, integer, market_prefix, to_symbol
 
 CTX = ssl.create_default_context()
-CTX.check_hostname = False
-CTX.verify_mode = ssl.CERT_NONE
+LOG = logging.getLogger(__name__)
 
 HDR_SINA = {"User-Agent": "Mozilla/5.0", "Referer": "https://finance.sina.com.cn"}
 HDR_EM = {"User-Agent": "Mozilla/5.0", "Referer": "https://data.eastmoney.com/"}
@@ -30,11 +33,31 @@ HDR_TX = {"User-Agent": "Mozilla/5.0", "Referer": "https://gu.qq.com/"}
 # 周期 → 新浪 scale 值。240 分钟 = 一个交易日 = 日线。
 SCALE = {"day": 240, "m60": 60, "m30": 30, "m15": 15, "m5": 5}
 UNIT = {"day": "日线", "m60": "60分钟线", "m30": "30分钟线", "m15": "15分钟线", "m5": "5分钟线"}
+PROVENANCE = {"provider": "sina.getKLineData", "adjustment": "provider_default",
+              "amount": "close_times_volume"}
 
 
 def _get(url, hdr, dec="utf-8", timeout=25):
-    req = urllib.request.Request(url, headers=hdr)
-    return urllib.request.urlopen(req, timeout=timeout, context=CTX).read().decode(dec, "ignore")
+    """Bounded retries for transport failures/rate limits; never disable TLS checks."""
+    for attempt in range(3):
+        req = urllib.request.Request(url, headers=hdr)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout, context=CTX) as response:
+                return response.read().decode(dec)
+        except urllib.error.HTTPError as e:
+            if e.code not in (408, 429, 500, 502, 503, 504) or attempt == 2:
+                raise
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+            if isinstance(getattr(e, "reason", e), ssl.SSLCertVerificationError) or attempt == 2:
+                raise
+        LOG.warning("行情请求重试 %d/2: %s", attempt + 1, url)
+        time.sleep(0.25 * (2 ** attempt))
+
+
+def validate_freq(freq):
+    if not isinstance(freq, str) or freq not in SCALE:
+        raise InputError("未知周期 %s" % freq)
+    return freq
 
 
 def _ts(raw, scale):
@@ -54,8 +77,10 @@ def sina_kline(symbol, freq="day", count=800):
     返回按时间升序的 bars：{date, open, high, low, close, volume}
     （volume 单位是**股**，腾讯的 fqkline 是手，别混用）。
     """
-    scale = SCALE[freq]
-    u = ("http://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+    symbol = to_symbol(symbol)
+    scale = SCALE[validate_freq(freq)]
+    count = integer(count, "count", 30, 5000)
+    u = ("https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
          "CN_MarketData.getKLineData?symbol=%s&scale=%d&ma=no&datalen=%d"
          % (symbol, scale, count))
     d = json.loads(_get(u, HDR_SINA))
@@ -70,24 +95,46 @@ def sina_kline(symbol, freq="day", count=800):
              "volume": float(x.get("volume") or 0)} for x in d]
 
 
+class MarketListError(RuntimeError):
+    pass
+
+
 def market_list(node="hs_a", pages=60, num=100, timeout=25):
-    """新浪全市场股票列表（默认沪深 A）。返回 [{symbol, name, code}]。"""
+    """All requested pages must succeed; an error is never an empty page."""
     from concurrent.futures import ThreadPoolExecutor
 
     def one(p):
-        u = ("http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+        u = ("https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/"
              "Market_Center.getHQNodeData?page=%d&num=%d&sort=symbol&asc=1&node=%s"
              % (p, num, node))
         try:
             d = json.loads(_get(u, HDR_SINA, "gbk", timeout))
-            return [{"symbol": x["symbol"], "name": x["name"], "code": x["code"]} for x in d]
-        except Exception:                                       # noqa: BLE001
-            return []
+            # Sina returns null/[] for pages after the end of the market.
+            if d is None:
+                d = []
+            if not isinstance(d, list):
+                raise ValueError("列表响应不是数组")
+            return [{"symbol": to_symbol(x["symbol"]), "name": x["name"],
+                     "code": to_symbol(x["symbol"])[2:]} for x in d], None
+        except Exception as e:
+            LOG.warning("市场列表第 %d 页失败", p, exc_info=True)
+            return [], "第 %d 页: %s: %s" % (p, type(e).__name__, e)
 
-    out = []
+    out, errors, last = [], [], []
     with ThreadPoolExecutor(max_workers=10) as ex:
-        for r in ex.map(one, range(1, pages + 1)):
+        for r, error in ex.map(one, range(1, pages + 1)):
             out += r
+            last = r
+            if error:
+                errors.append(error)
+    if errors:
+        raise MarketListError("市场列表不完整（失败 %d 页）；%s" % (len(errors), "; ".join(errors[:3])))
+    if not out:
+        raise MarketListError("市场列表为空，保留上次成功扫描")
+    if len(last) >= num:
+        raise MarketListError("市场列表达到分页上限，无法确认完整性")
+    if len({x["symbol"] for x in out}) != len(out):
+        raise MarketListError("市场列表包含重复标的，无法确认完整性")
     return out
 
 
@@ -101,7 +148,8 @@ def industry_map(pages=50, size=500):
         try:
             j = json.loads(_get(u, HDR_EM))
             return ((j.get("result") or {}).get("data") or [])
-        except Exception:                                       # noqa: BLE001
+        except Exception:
+            LOG.warning("行业第 %d 页获取失败", p, exc_info=True)
             return []
 
     rows = []
@@ -114,43 +162,18 @@ def industry_map(pages=50, size=500):
         if not code:
             continue
         full = x.get("EM2016") or ""
-        mp[code] = {"name": x.get("SECURITY_NAME_ABBR") or "",
+        mp[to_symbol(code)] = {"name": x.get("SECURITY_NAME_ABBR") or "",
                     "l1": full.split("-")[0] if full else "未分类",
                     "full": full or "未分类"}
     return mp
 
 
-def market_prefix(code):
-    """代码 → 交易所前缀。
-
-    ⚠️ 别漏 ETF 段：**5 开头是上交所 ETF**（510300 沪深300ETF、588000 科创50ETF），
-    **1 开头是深交所 ETF/LOF**（159915 创业板ETF）；只认 6/0/3 会把这两段误判成 bj，
-    表现是接口「未返回数据」而不是报错，极易误当成数据源故障。
-    显式前缀（sh/sz/bj/hk）一律透传 —— 指数必须走这条：sh000001 上证指数与
-    sz000001 平安银行代码完全相同。
-    """
-    c = str(code).strip().lower()
-    if c.startswith(("sh", "sz", "bj")) and c[2:].isdigit():
-        return c[:2]
-    if c.startswith("hk") or (len(c) == 5 and c.isdigit()):
-        return "hk"
-    if c.startswith(("6", "5")):
-        return "sh"
-    if c.startswith(("0", "3", "1")):
-        return "sz"
-    return "bj"
-
-
-def to_symbol(code):
-    c = str(code).strip().lower()
-    return c if c.startswith(("sh", "sz", "bj", "hk")) else market_prefix(c) + c
-
-
 def quote_name(code):
     """腾讯报价取名称（新浪列表覆盖不到 ETF / 榜外代码时兜底）。取不到返回空串。"""
     try:
-        txt = _get("http://qt.gtimg.cn/q=%s" % to_symbol(code), HDR_TX, "gbk", 10)
+        txt = _get("https://qt.gtimg.cn/q=%s" % to_symbol(code), HDR_TX, "gbk", 10)
         p = txt.split("~")
         return p[1] if len(p) > 1 and p[1] else ""
     except Exception:                                           # noqa: BLE001
+        LOG.warning("名称查询失败: %s", code, exc_info=True)
         return ""

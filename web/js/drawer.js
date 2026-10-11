@@ -15,17 +15,24 @@ const Drawer = (() => {
   // 数据来自后端 chart.hist，默认开着 —— 图和理由必须能互相印证。
   LAYERS.histbuy = 1;
 
-  let cur = null;          // 当前票行（来自榜单）
+  /** @type {StockRef | null} */
+  let cur = null;
+  /** @type {Frequency} */
   let freq = 'day';
+  /** @type {Partial<Record<Frequency, StockPayload>>} */
   let cache = {};          // freq → payload
-  let seq = 0;             // 请求序号：慢的那个回来要丢弃，否则会盖掉后发的
+  const chartGate = new RequestGate();
+  const reportGate = new RequestGate();
+  let active = false;
   let opened = false;
 
   const el = id => document.getElementById(id);
 
   /* ---------------- 打开 / 关闭 ---------------- */
   function open(row, f) {
+    if (window.Zoom) Zoom.close();
     cur = row;
+    active = true;
     freq = f || 'day';
     cache = {};
     el('dwName').textContent = row.name || row.code;
@@ -39,11 +46,18 @@ const Drawer = (() => {
     el('dwCard').innerHTML = '';
     el('drawer').classList.add('on');
     el('drawer').setAttribute('aria-hidden', 'false');
-    Drawer.openCode = row.code;
+    Drawer.openCode = row.symbol || row.code;
     load(freq);
   }
 
   function close() {
+    if (window.Zoom) Zoom.close();
+    active = false;
+    chartGate.cancel();
+    reportGate.cancel();
+    clearChart();
+    cur = null;
+    cache = {};
     el('drawer').classList.remove('on');
     el('drawer').setAttribute('aria-hidden', 'true');
     Drawer.openCode = null;
@@ -55,16 +69,39 @@ const Drawer = (() => {
   }
 
   /* ---------------- 取数 ---------------- */
+  function clearChart() {
+    LAST.d = null;
+    LAST.hist = [];
+    const cv = el('mcv');
+    if (cv) {
+      const empty = document.createElement('canvas');
+      empty.id = 'mcv';
+      empty.width = cv.width;
+      empty.height = cv.height;
+      empty.style.width = '100%';
+      empty.style.height = cv.style.height || '360px';
+      cv.parentNode.replaceChild(empty, cv); // remove old tooltip/double-click closures too
+    }
+    el('tip').style.display = 'none';
+    el('dwZoom').disabled = true;
+  }
+
   async function load(f) {
-    const my = ++seq;
+    const ticket = chartGate.begin(); // also invalidate pending requests on a cache hit
+    const stock = cur;
+    reportGate.cancel();
+    el('dwReportBox').open = false;
+    el('dwReport').textContent = '';
+    clearChart();
+    el('dwCard').innerHTML = '';
     el('dwMeta').textContent = freq === f ? '载入中…' : el('dwMeta').textContent;
     try {
-      const d = await API.stock(cur.code, f);
-      if (my !== seq) return;                      // 期间又切了周期/换了票
+      const d = cache[f] || await API.stock(stock.symbol || stock.code, f, {}, ticket.signal);
+      if (!active || !chartGate.isCurrent(ticket) || cur !== stock || freq !== f) return;
       cache[f] = d;
       render(d);
     } catch (e) {
-      if (my !== seq) return;
+      if (!active || !chartGate.isCurrent(ticket)) return;
       el('dwMeta').innerHTML = '';
       el('dwCard').innerHTML = `<div class="dw-err">载入失败：${esc(e.message)}</div>`;
     }
@@ -76,7 +113,7 @@ const Drawer = (() => {
     const st = d.structure || {};
     el('dwMeta').innerHTML =
       `现价 <b>${d.close != null ? (+d.close).toFixed(2) : '—'}</b>` +
-      `　成交额 <b>${(+d.amt).toFixed(2)} 亿</b>` +
+      `　估算成交额 <b>${(+d.amt).toFixed(2)} 亿</b>` +
       `　${esc(d.unit)} <b>${d.bars}</b> 根` +
       (st.ZD != null
         ? `　中枢 <b>ZD ${(+st.ZD).toFixed(2)} / ZG ${(+st.ZG).toFixed(2)}</b>（${esc(st.pos)}）`
@@ -88,6 +125,7 @@ const Drawer = (() => {
     el('dwCard').innerHTML = cardHTML(d);
     renderLayers();
     chart(d);
+    el('dwZoom').disabled = !LAST.d;
   }
 
   // 图上编号 = 类型编号（1 一类 / 2 二类 / 3 三类），与卡片左上角的方块同源；
@@ -138,13 +176,13 @@ const Drawer = (() => {
     const ret = h.ret == null ? 0 : +h.ret;
     return `<div class="wi">` +
       `<div class="wi-h"><span class="bdg ${kind}${h.n}">${h.n}</span>` +
-      `<b>${esc(h.type)}</b><span class="dt">${fmtDate(h.d)}</span>` +
-      `<span class="tg ${h.live ? 'on' : 'off'}">${h.live ? '至今仍有效' : '已失效'}</span></div>` +
+      `<b>${esc(h.ty || h.t)}</b><span class="dt">${fmtDate(h.d)}</span>` +
+      `<span class="tg ${h.live ? 'on' : 'off'}">${h.live ? '引擎持续报出' : '已停止报出'}</span></div>` +
       (why ? `<table class="wt">${why}</table>`
            : '<div class="wnone">引擎未提供判据明细。</div>') +
       `<div class="wi-f">${kind === 'b' ? '入场' : '出场'} ${dec(h.entry)}（信号报出当根收盘）` +
       (h.stop != null ? `　·　${kind === 'b' ? '止损' : '失效位'} ${dec(h.stop)}` : '') +
-      `　·　存活 <b>${h.alive}</b> 根　·　期内 <b>${ret >= 0 ? '+' : ''}${ret.toFixed(1)}%</b>` +
+      `　·　持续 <b>${h.alive}</b> 根　·　期内 <b>${ret >= 0 ? '+' : ''}${ret.toFixed(1)}%</b>` +
       `</div></div>`;
   }
 
@@ -196,6 +234,7 @@ const Drawer = (() => {
       ${body.join('')}
       ${pendTxt}
       <div class="sig-n" style="margin-top:6px;padding-top:6px;border-top:1px dashed var(--line)">
+        历史卡片状态表示引擎是否持续报出；榜单「未失效」另外检查现价是否越过失效位。<br>
         笔 ${st.biCount} 段 · 分型 ${st.fxCount} 个 · 中枢 ${st.zsCount} 个（全局结构统计）
       </div>
     </div>`;
@@ -215,6 +254,7 @@ const Drawer = (() => {
       // 画不出来时**必须让人看见**：空白 canvas 会让人以为「这只票没结构」，
       // 而实际是渲染挂了 —— 两者一个是数据结论、一个是故障，不能混。
       console.error(e);
+      LAST.d = null;
       el('dwCard').insertAdjacentHTML('beforeend',
         `<div class="dw-err">图表渲染失败：${esc(e.message)}<pre style="margin-top:6px;white-space:pre-wrap;font-size:11px">${esc(e.stack || '')}</pre></div>`);
     }
@@ -273,8 +313,7 @@ const Drawer = (() => {
       if (!b || b.disabled) return;
       freq = b.dataset.freq;
       syncFreqBtns();
-      if (cache[freq]) render(cache[freq]);
-      else load(freq);
+      load(freq);
     });
 
     el('dwLayers').addEventListener('change', e => {
@@ -285,12 +324,16 @@ const Drawer = (() => {
     });
 
     el('dwReportBox').addEventListener('toggle', async () => {
-      if (!el('dwReportBox').open || el('dwReport').textContent) return;
+      if (!el('dwReportBox').open) { reportGate.cancel(); if (el('dwReport').textContent === '载入中…') el('dwReport').textContent = ''; return; }
+      if (!active || !cur || el('dwReport').textContent) return;
+      const ticket = reportGate.begin(), stock = cur, period = freq;
       el('dwReport').textContent = '载入中…';
       try {
-        const d = await API.stock(cur.code, freq, { report: 1 });
+        const d = await API.stock(stock.symbol || stock.code, period, { report: 1 }, ticket.signal);
+        if (!reportGate.isCurrent(ticket) || !active || cur !== stock || freq !== period) return;
         el('dwReport').textContent = d.report || '（无）';
       } catch (e) {
+        if (!reportGate.isCurrent(ticket) || !active) return;
         el('dwReport').textContent = '加载失败：' + e.message;
       }
     });
@@ -308,10 +351,11 @@ const Drawer = (() => {
                      不一致的话「关掉放大视图发现抽屉还是旧图层」会让人以为开关坏了
      ★ 新组件要读抽屉的数据，一律走 snapshot()，不要去摸 LAST / cache 这些内部变量。 */
   function snapshot() {
-    if (!LAST.d || !cur) return null;
-    const p = cache[freq] || {};
+    if (!active || !LAST.d || !cur) return null;
+    const p = cache[freq];
+    if (!p || LAST.d !== p.chart.pack) return null;
     return {
-      code: cur.code, name: cur.name, freq: freq,
+      code: cur.code, symbol: p.symbol, name: cur.name || p.name, freq: freq,
       unit: p.unit || '', bars: p.bars || 0,
       d: LAST.d, dates: LAST.dates, opt: LAST.opt, hist: LAST.hist,
     };

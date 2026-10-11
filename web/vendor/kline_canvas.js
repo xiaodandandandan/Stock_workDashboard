@@ -12,6 +12,7 @@
  *        在任意窗口宽度下算同一条命中列；
  *     5. `bindTip` 支持自定义 tooltip 容器，并返回 { update } 换数据不重挂监听器；
  *     6. 纵向取值域跳过窗口外的笔端点（放大视图会故意多带邻接端点用于连线）。
+ *     7. 跨窗口的笔按原坐标裁剪，保留斜率；仅原序列最后一笔标虚线。
  *
  * 用法：
  *   var cv = document.getElementById('cv');
@@ -48,7 +49,7 @@ var LAB = {
   hist: '历史',            // tooltip 里历史信号的定语
   typeSuffix: '类买点',     // 拼成「历史一类买点」
   anonType: 0,             // 1 = 用 Ⅰ/Ⅱ/Ⅲ 型结构 代替「X类买点」
-  liveOn: '（至今仍有效）',  // 信号仍有效
+  liveOn: '（引擎持续报出）',
   entry: '入场',           // 复盘价
   alive: '存活',           // 存活根数
   now: '至今',             // 至今涨跌
@@ -258,15 +259,21 @@ function draw(ctx, d, dates, opt, hist) {
 
   // 笔：上笔红 / 下笔绿；**最后一笔虚线**（尚未确认，可能还会变）
   if (LAYERS.bi && d.bi && d.bi.length > 1) {
+    ctx.save();
+    ctx.beginPath(); ctx.rect(PL, PT, cw, mainH); ctx.clip();
+    // Outside endpoints keep their true x coordinate; clipping preserves the slope.
+    var strokeX = function (i) { return PL + i * bw + bw / 2; };
     ctx.lineJoin = 'round'; ctx.lineWidth = 1.7; ctx.globalAlpha = .88;
     for (var i4 = 0; i4 < d.bi.length - 1; i4++) {
       var a2 = d.bi[i4], b2 = d.bi[i4 + 1];
       ctx.strokeStyle = (b2[2] > a2[2]) ? COL.up : COL.dn;
-      if (i4 === d.bi.length - 2) ctx.setLineDash([5, 3]); else ctx.setLineDash([]);
+      var provisional = d.biLast == null ? i4 === d.bi.length - 2 : b2[0] === d.biLast;
+      if (provisional) ctx.setLineDash([5, 3]); else ctx.setLineDash([]);
       ctx.beginPath();
-      ctx.moveTo(X(a2[0]), Y(a2[2])); ctx.lineTo(X(b2[0]), Y(b2[2])); ctx.stroke();
+      ctx.moveTo(strokeX(a2[0]), Y(a2[2])); ctx.lineTo(strokeX(b2[0]), Y(b2[2])); ctx.stroke();
     }
     ctx.setLineDash([]); ctx.globalAlpha = 1;
+    ctx.restore();
   }
 
   // 分型：顶朝上三角、底朝下三角。**未成笔的分型也画** ——
@@ -446,7 +453,7 @@ function bindTip(cv, d, dates, hist, tipEl) {
         if (hist[k].i === i) {
           var hh = hist[k];
           txt += '\n————\n' + LAB.hist
-               + (LAB.anonType ? ((hh.rn || hh.n) + '型结构') : (hh.t + LAB.typeSuffix))
+               + (LAB.anonType ? ((hh.rn || hh.n) + '型结构') : (hh.ty || hh.t))
                + (hh.live ? LAB.liveOn : '')
                + '\n' + LAB.entry + ' ' + hh.entry + '　' + LAB.stop + ' ' + (hh.stop == null ? '—' : hh.stop)
                + '\n' + LAB.alive + ' ' + hh.alive + ' 根';

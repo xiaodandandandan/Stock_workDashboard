@@ -1,0 +1,43 @@
+type Frequency = 'day' | 'm60' | 'm30' | 'm15' | 'm5';
+type SymbolId = `sh${string}` | `sz${string}` | `bj${string}` | `hk${string}`;
+type StrokePoint = [number, number, number];
+interface RequestTicket { id: number; signal: AbortSignal }
+interface StockRef { code: string; symbol?: SymbolId; name?: string; industry?: string }
+interface SignalReason { k: string; v: string; need?: string; ok: boolean | number }
+interface Signal {
+  type: string; date: string; stop: number | null; fresh: number;
+  valid: 0 | 1; trend: -1 | 0 | 1; why: SignalReason[];
+  first_i: number | null; entry: number | null; alive: number | null; ret: number | null;
+}
+interface HistoryMarker {
+  i: number; side: 'b' | 's'; t: string; ty: string; n: string;
+  d: string; alive: number; live: 0 | 1; entry: number;
+  stop: number | null; ret: number; why: SignalReason[];
+}
+interface ChartPack {
+  n: number; d0: string; o: number[]; h: number[]; l: number[]; c: number[]; v: number[];
+  fx?: StrokePoint[]; bi?: StrokePoint[]; biLast?: number;
+  zs?: [number, number, number, number][]; md?: number[]; ar?: [number, number][];
+}
+interface StockPayload {
+  code: string; symbol: SymbolId; freq: Frequency; name: string; industry: string;
+  close: number; amt: number; bars: number; date: string; unit: string;
+  cached: boolean; in_scan: boolean; elapsed_ms: number; data_version: string;
+  structure: { ZD: number | null; ZG: number | null; pos: string; biCount: number; fxCount: number; zsCount: number };
+  signals: { buy: Signal[]; sell: Signal[] };
+  chart: { pack: ChartPack; dates: string[]; opt: Record<string, number>; hist: HistoryMarker[] };
+  history_total?: number; report?: string;
+}
+interface ScanRow extends StockRef {
+  symbol: SymbolId; close: number; amt: number; date: string;
+  buy: Signal[]; sell: Signal[];
+}
+interface ScanPayload {
+  rows: ScanRow[]; generated: string; hit: number; total_scanned: number; elapsed: number;
+  lookback: number; count: number; freq: Frequency; errors: number; complete: boolean;
+}
+interface ScanOptions { limit?: number; workers?: number; freq?: Frequency; count?: number; lookback?: number }
+interface ScanStatus {
+  running: boolean; stage: string; done: number; total: number; msg: string; error: string;
+  result: { hit: number; elapsed: number; errors: number; complete: boolean } | null;
+}

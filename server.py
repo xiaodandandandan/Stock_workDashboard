@@ -19,13 +19,15 @@
 """
 import argparse
 import json
+import logging
 import os
 import sys
 import threading
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs
+from pathlib import Path
+from urllib.parse import urlparse, parse_qs, unquote
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -33,6 +35,10 @@ from core import WEB, CACHE                              # noqa: E402
 from core import datasource as DS                        # noqa: E402
 from core import engine as E                             # noqa: E402
 from core import store as ST                             # noqa: E402
+from core import engine_identity                         # noqa: E402
+from core.validation import InputError, integer          # noqa: E402
+
+LOG = logging.getLogger(__name__)
 
 MIME = {".html": "text/html; charset=utf-8", ".js": "application/javascript; charset=utf-8",
         ".css": "text/css; charset=utf-8", ".json": "application/json; charset=utf-8",
@@ -48,14 +54,13 @@ JOB_LOCK = threading.Lock()
 _IND = None
 _IND_LOCK = threading.Lock()
 
-# 「历史信号段」是切片复算的结果（约 0.9 s / 票）。同一只票同周期在同一天内结果不变，
-# 按 (freq, code, 最后一根日期) 缓存 —— 第二次点开同一只票就是 0 成本。
+# Cache by complete data content, including intrabar and historical corrections.
 _HIST = {}
 _HIST_LOCK = threading.Lock()
 
 
 def cached_history(freq, code, bars):
-    key = (freq, code, str(bars[-1]["date"]))
+    key = (freq, DS.to_symbol(code), ST.bars_version(bars))
     with _HIST_LOCK:
         hit = _HIST.get(key)
     if hit is not None:
@@ -81,9 +86,9 @@ def industry_lookup():
 
 
 def scan_meta():
-    """从最近一次扫描结果里取 code → 行 的索引（名称 / 行业 / 成交额）。"""
+    """Full exchange-qualified symbols also support existing scan snapshots."""
     d = ST.load_scan() or {}
-    return {r["code"]: r for r in d.get("rows", [])}, d
+    return {DS.to_symbol(r.get("symbol") or r["code"]): r for r in d.get("rows", [])}, d
 
 
 # ---------------------------------------------------------------- 单票
@@ -91,45 +96,50 @@ def stock_payload(code, freq="day", lookback=250, with_report=False):
     """单票数据。日 K 优先吃扫描时的缓存（秒回），分钟线现取现算。"""
     t0 = time.perf_counter()
     sym = DS.to_symbol(code)
-    code = sym[2:] if sym[:2] in ("sh", "sz", "bj") else code
+    code = sym[2:]
+    freq = DS.validate_freq(freq)
+    lookback = integer(lookback, "lookback", 30, 5000)
 
     cached = True
-    bars = ST.load_kline(freq, code)
+    bars = ST.load_kline(freq, sym)
     if not bars:
         cached = False
         bars = DS.sina_kline(sym, freq, 800)
         try:
-            ST.save_kline(freq, code, bars)
+            ST.save_kline(freq, sym, bars)
         except Exception:                                    # noqa: BLE001
-            pass
+            LOG.warning("缓存写入失败: %s %s", sym, freq, exc_info=True)
     if len(bars) < 30:
         raise RuntimeError("K 线不足（%d 根），无法做结构分析" % len(bars))
 
     # 抽屉要展示该级别历史上全部信号段（含已失效）并显示「存活 N 根 / 期内 ±x%」——
-    # 只能切片复算，结果按天缓存。榜单（scan.py）不走这条路：那边每只票都算的话
+    # 只能切片复算，结果按数据版本缓存。榜单（scan.py）不走这条路：那边每只票都算的话
     # 全市场要多花 80 分钟。
-    hist = cached_history(freq, code, bars)
+    hist = cached_history(freq, sym, bars)
     a = E.analyze(bars, unit=DS.UNIT.get(freq, freq), lookback=lookback,
                   with_report=with_report, history=hist)
     if not a:
         raise RuntimeError("K 线不足，无法打包结构")
 
     rows, scand = scan_meta()
-    row = rows.get(code) or {}
-    name = row.get("name") or DS.quote_name(code)
+    row = rows.get(sym) or {}
+    name = row.get("name") or DS.quote_name(sym)
     ind = row.get("industry")
     ind_full = row.get("industry_full")
     if not ind:
-        m = industry_lookup().get(code) or {}
+        m = industry_lookup().get(sym) or {}
         ind, ind_full = m.get("l1", "未分类"), m.get("full", "未分类")
 
     last = bars[-1]
     a.update({
         "code": code, "symbol": sym, "name": name,
+        "freq": freq, "data_version": ST.bars_version(bars),
+        "engine": engine_identity(E.K),
+        "source": DS.PROVENANCE,
         "industry": ind or "未分类", "industry_full": ind_full or "未分类",
         "amt": round(last["close"] * last["volume"] / 1e8, 3),
         "scan_at": scand.get("generated", ""),
-        "in_scan": code in rows,
+        "in_scan": sym in rows,
         "cached": cached,
         "elapsed_ms": int((time.perf_counter() - t0) * 1000),
     })
@@ -138,6 +148,8 @@ def stock_payload(code, freq="day", lookback=250, with_report=False):
 
 # ---------------------------------------------------------------- 扫描任务
 def start_scan(limit=0, workers=20, freq="day", count=800, lookback=5):
+    import scan as SC
+    options = SC.validate_options(limit, workers, freq, count, lookback)
     with JOB_LOCK:
         if JOB["running"]:
             return False
@@ -151,16 +163,16 @@ def start_scan(limit=0, workers=20, freq="day", count=800, lookback=5):
 
     def work():
         try:
-            import scan as SC
-            p = SC.run_scan(limit=limit, freq=freq, count=count, lookback=lookback,
-                            workers=workers, progress=progress)
+            p = SC.run_scan(**options, progress=progress)
             with JOB_LOCK:
                 JOB.update({"result": {"hit": p["hit"], "total": p["total_scanned"],
                                        "elapsed": p["elapsed"],
+                                       "errors": p["errors"], "complete": p["complete"],
                                        "generated": p["generated"]}})
         except Exception as e:                               # noqa: BLE001
             with JOB_LOCK:
                 JOB["error"] = "%s: %s" % (type(e).__name__, e)
+                JOB["stage"] = "failed"
             traceback.print_exc()
         finally:
             with JOB_LOCK:
@@ -176,6 +188,10 @@ def start_scan(limit=0, workers=20, freq="day", count=800, lookback=5):
 # ---------------------------------------------------------------- HTTP
 class Handler(BaseHTTPRequestHandler):
     server_version = "ChanlunWorkbench"
+
+    def setup(self):
+        super().setup()
+        self.connection.settimeout(15)
 
     def log_message(self, fmt, *args):
         pass                                                 # 静音：默认每请求一行太吵
@@ -221,6 +237,8 @@ class Handler(BaseHTTPRequestHandler):
             if p.startswith("/api/"):
                 return self.api_get(p, qs)
             return self.static(p)
+        except InputError as e:
+            self.send_json({"error": str(e)}, 400)
         except Exception as e:                               # noqa: BLE001
             traceback.print_exc()
             self.send_json({"error": "%s: %s" % (type(e).__name__, e)}, 500)
@@ -228,16 +246,18 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         u = urlparse(self.path)
         if u.path == "/api/scan":
-            n = int(self.headers.get("Content-Length") or 0)
-            body = {}
-            if n:
-                try:
-                    body = json.loads(self.rfile.read(n).decode("utf-8"))
-                except Exception:                            # noqa: BLE001
-                    body = {}
-            started = start_scan(limit=int(body.get("limit") or 0),
-                                 workers=int(body.get("workers") or 20),
-                                 freq=body.get("freq") or "day")
+            try:
+                n = integer(self.headers.get("Content-Length", "0"), "Content-Length", 0, 8192)
+                body = json.loads(self.rfile.read(n).decode("utf-8")) if n else {}
+                if not isinstance(body, dict):
+                    raise InputError("请求体必须是 JSON 对象")
+                allowed = {"limit", "workers", "freq", "count", "lookback"}
+                if set(body) - allowed:
+                    raise InputError("未知扫描参数")
+                started = start_scan(**body)
+            except (InputError, UnicodeError, json.JSONDecodeError) as e:
+                self.close_connection = True
+                return self.send_json({"error": str(e)}, 400)
             return self.send_json({"started": started,
                                    "reason": "" if started else "已有扫描在跑"})
         self.send_error(404, "Not Found")
@@ -249,6 +269,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if p == "/api/health":
             s = ST.load_scan()
+            with JOB_LOCK:
+                job = {k: v for k, v in JOB.items() if k != "result"}
             return self.send_json({
                 "ok": True, "time": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "scan": {"generated": (s or {}).get("generated", ""),
@@ -256,7 +278,8 @@ class Handler(BaseHTTPRequestHandler):
                          "total": (s or {}).get("total_scanned", 0),
                          "elapsed": (s or {}).get("elapsed", 0)} if s else None,
                 "cached_kline": sum(len(f) for _, _, f in os.walk(os.path.join(CACHE, "kline"))),
-                "job": {k: v for k, v in JOB.items() if k != "result"},
+                "job": job, "last_attempt": ST.load_scan_attempt(),
+                "engine": engine_identity(E.K),
             })
 
         if p == "/api/scan":
@@ -275,11 +298,11 @@ class Handler(BaseHTTPRequestHandler):
             code = one("code").strip()
             if not code:
                 return self.send_json({"error": "缺少 code"}, 400)
-            freq = one("freq", "day")
-            if freq not in DS.SCALE:
-                return self.send_json({"error": "未知周期 %s" % freq}, 400)
+            freq = DS.validate_freq(one("freq", "day"))
+            if one("report", "0") not in ("0", "1"):
+                raise InputError("report 必须是 0 或 1")
             return self.send_json(stock_payload(
-                code, freq, lookback=int(one("lookback", "250") or 250),
+                code, freq, lookback=integer(one("lookback", "250"), "lookback", 30, 5000),
                 with_report=one("report") == "1"))
 
         if p == "/api/industry":
@@ -294,13 +317,17 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- 静态
     def static(self, p):
-        rel = p.lstrip("/") or "index.html"
-        full = os.path.normpath(os.path.join(WEB, rel))
-        if not full.startswith(os.path.normpath(WEB)):       # 防目录穿越
+        try:
+            root = Path(WEB).resolve()
+            rel = unquote(p).replace("\\", "/").lstrip("/") or "index.html"
+            full = (root / rel).resolve()
+            if full.is_dir():
+                full = (full / "index.html").resolve()
+            if not full.is_relative_to(root):
+                raise ValueError("outside static root")
+        except (OSError, ValueError, RuntimeError):
             self.send_error(403, "Forbidden")
             return
-        if os.path.isdir(full):
-            full = os.path.join(full, "index.html")
         self.send_file(full)
 
 

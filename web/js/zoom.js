@@ -23,6 +23,7 @@ const Zoom = (() => {
 
   let S = null;               // 视图状态，见 open()
   let cv = null, tipApi = null, bound = false, raf = 0;
+  const historyGate = new RequestGate();
 
   const el = id => document.getElementById(id);
   const isOn = () => el('zoom').classList.contains('on');
@@ -70,7 +71,8 @@ const Zoom = (() => {
     if (fd.md) d.md = fd.md.slice(a, b);
     d.fx = (fd.fx || []).filter(p => p[0] >= a && p[0] < b).map(p => [p[0] - a, p[1], p[2]]);
     // ★ 多留一个窗口外的邻接端点（a-1 / b），见文件头第 3 条
-    d.bi = (fd.bi || []).filter(p => p[0] >= a - 1 && p[0] <= b).map(p => [p[0] - a, p[1], p[2]]);
+    d.bi = sliceStrokePoints(fd.bi || [], a, b);
+    if (fd.bi && fd.bi.length) d.biLast = fd.bi[fd.bi.length - 1][0] - a;
     d.zs = [];
     (fd.zs || []).forEach(z => {                       // 中枢带按窗口裁切，跨窗口的截到边上
       const i0 = Math.max(z[0], a), i1 = Math.min(z[1], b - 1);
@@ -145,7 +147,8 @@ const Zoom = (() => {
   function open() {
     const snap = Drawer.snapshot && Drawer.snapshot();
     if (!snap || !snap.d) return;
-    S = { code: snap.code, name: snap.name, freq: snap.freq, avail: snap.bars || 0,
+    historyGate.cancel();
+    S = { code: snap.symbol || snap.code, name: snap.name, freq: snap.freq, avail: snap.bars || 0,
           fd: snap.d, fdates: snap.dates, fopt: snap.opt || {}, fhist: snap.hist || [], base: 0 };
     S.base = baseOf(S.fd, S.fdates);
     setWin(0, S.fd.n);
@@ -170,6 +173,7 @@ const Zoom = (() => {
   }
 
   function close() {
+    historyGate.cancel();
     el('zoom').classList.remove('on');
     el('zoom').setAttribute('aria-hidden', 'true');
     if (tipApi && tipApi.hide) tipApi.hide();
@@ -186,11 +190,13 @@ const Zoom = (() => {
   /* ---------------- 加载更长历史 ---------------- */
   async function loadMore() {
     if (!S || S.avail <= NB()) return;
+    const view = S, ticket = historyGate.begin();
     const btn = el('zmMore');
     btn.disabled = true;
     btn.textContent = '载入中…';
     try {
-      const p = await API.stock(S.code, S.freq, { lookback: S.avail });
+      const p = await API.stock(view.code, view.freq, { lookback: view.avail }, ticket.signal);
+      if (!historyGate.isCurrent(ticket) || S !== view) return;
       if (!p || !p.chart || !p.chart.pack) throw new Error('返回数据不完整');
       S.fd = p.chart.pack;
       S.fdates = p.chart.dates;
@@ -203,9 +209,10 @@ const Zoom = (() => {
       buildPresets();
       render();
     } catch (e) {
+      if (!historyGate.isCurrent(ticket) || S !== view) return;
       btn.textContent = '载入失败：' + e.message;
     } finally {
-      btn.disabled = false;
+      if (historyGate.isCurrent(ticket) && S === view) btn.disabled = false;
     }
   }
 

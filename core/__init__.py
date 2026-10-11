@@ -12,26 +12,24 @@ server 只做「路由 + JSON 序列化」，一旦把计算写进去，后面�
 """
 import os
 import sys
+import hashlib
+from pathlib import Path
+from functools import lru_cache
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CACHE = os.path.join(ROOT, "cache")
 WEB = os.path.join(ROOT, "web")
 
-# ★ 缠论引擎（chanlun_core.py）是纯计算、零第三方依赖，本机**引用技能里的那份**
-#   而不是拷一份 —— 引擎的修正（笔 / 中枢 / 背驰规则）必须自动流到工作台；复制一份
-#   必然慢慢分叉，最后「榜上的信号」和「技能算的信号」不是一个东西，排查成本极高。
-#
-#   查找顺序（前者命中就不用后者）：
-#     1. ~/.workbuddy/skills/chanlun-kline/scripts   ← 本机常规位置（单一真相源）
-#     2. $CHANLUN_ENGINE_DIR                          ← 换机器时指过去
-#     3. core/_engine/                                ← 想独立运行就把引擎丢这里
+# External engine lookup: explicit configuration, bundled copy, then personal skills.
+# Use CHANLUN_ENGINE_SHA256 to keep a reviewed version instead of silently following upgrades.
 SKILLS = os.path.join(os.path.expanduser("~"), ".workbuddy", "skills")
 CHANLUN_DIR = os.path.join(SKILLS, "chanlun-kline", "scripts")
 BRIDGE_DIR = os.path.join(SKILLS, "astock-chanlun-bridge", "scripts")
-ENGINE_DIR = os.environ.get("CHANLUN_ENGINE_DIR") or os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "_engine")
+ENGINE_DIR = os.environ.get("CHANLUN_ENGINE_DIR")
+BUNDLED_ENGINE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_engine")
+ENGINE_PATHS = [p for p in (ENGINE_DIR, BUNDLED_ENGINE_DIR, CHANLUN_DIR, BRIDGE_DIR) if p]
 
-for _p in (CHANLUN_DIR, ENGINE_DIR, BRIDGE_DIR):
+for _p in reversed(ENGINE_PATHS):
     if os.path.isdir(_p) and _p not in sys.path:
         sys.path.insert(0, _p)
 
@@ -39,20 +37,27 @@ for _p in (CHANLUN_DIR, ENGINE_DIR, BRIDGE_DIR):
 def engine_ready():
     """引擎是否可用。启动时探一次，好给出「缺哪个文件、该放哪」而不是 ImportError 栈。"""
     try:
-        import chanlun_core  # noqa: F401
+        require_engine()
         return True, ""
-    except ImportError as e:
+    except (ImportError, RuntimeError) as e:
         return False, str(e)
 
 
 def engine_hint():
     """给用户的修复指引（只在引擎缺失时调用）。"""
-    looked = "\n".join("    %s" % p for p in (CHANLUN_DIR, ENGINE_DIR))
+    looked = "\n".join("    %s" % p for p in ENGINE_PATHS)
     return (
         "找不到缠论引擎 chanlun_core.py，已查找：\n%s\n"
         "把它（或整个 chanlun-kline/scripts 目录）放进上面的任一目录，\n"
         "或设环境变量 CHANLUN_ENGINE_DIR 指向存放它的目录。" % looked
     )
+
+
+@lru_cache(maxsize=8)
+def engine_identity(module):
+    path = getattr(module, "__file__", None)
+    digest = hashlib.sha256(Path(path).read_bytes()).hexdigest() if path else ""
+    return {"version": str(getattr(module, "__version__", "unversioned")), "sha256": digest}
 
 
 def require_engine():
@@ -63,6 +68,10 @@ def require_engine():
     """
     try:
         import chanlun_core
+        identity = engine_identity(chanlun_core)
+        expected = os.environ.get("CHANLUN_ENGINE_SHA256")
+        if expected and identity["sha256"] != expected.lower():
+            raise RuntimeError("缠论引擎与 CHANLUN_ENGINE_SHA256 不匹配，请检查引擎版本")
         return chanlun_core
     except ImportError as e:
         raise ImportError("%s\n（原始错误：%s）" % (engine_hint(), e)) from e
