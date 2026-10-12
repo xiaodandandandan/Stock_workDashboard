@@ -20,10 +20,11 @@ const CLS = {
   '一类卖点': 's1', '二类卖点': 's2', '三类卖点': 's3', '中枢跌破': 'sx',
 };
 const AMTLABEL = { 0: '不限', 1: '1亿', 3: '3亿', 5: '5亿', 10: '10亿', 20: '20亿', 50: '50亿' };
+const BOARD_LABELS = { '': '全部板块', main: '主板（沪深）', star: '科创板' };
 
 let LB = 5;                                    // boot() 里按后端返回的 lookback 更新
 const S = {
-  tab: 0, fresh: 0, validOnly: true, amt: 0, ind: '', q: '',
+  tab: 0, fresh: 0, validOnly: true, amt: 0, board: '', ind: '', q: '',
   exclST: true, exclBJ: false, trendOnly: false, sort: 'a', dir: -1,
 };
 
@@ -74,9 +75,12 @@ function signals(r) { return tabSignals(r, S.tab); }
 /* tab 之外的筛选。tab 计数也走它，保证「徽标数字 = 切过去看到的条数」 */
 function basePass(r) {
   if (r.amt < S.amt) return false;
+  const market = mkt(r.code);
+  if (S.board === 'main' && market !== '沪主板' && market !== '深主板') return false;
+  if (S.board === 'star' && market !== '科创') return false;
   if (S.ind && r.industry !== S.ind) return false;
   if (S.exclST && /ST/i.test(r.name)) return false;
-  if (S.exclBJ && mkt(r.code) === '北交所') return false;
+  if (S.exclBJ && market === '北交所') return false;
   if (S.q) {
     const q = S.q.toLowerCase();
     if (!(r.code.includes(q) || String(r.name).toLowerCase().includes(q))) return false;
@@ -237,6 +241,7 @@ function render() {
   renderTable(list);
   document.getElementById('hint').textContent =
     `筛选出 ${list.length} 只（原始命中 ${D.hit} 只）　·　` +
+    `上市板块：${BOARD_LABELS[S.board]}　·　` +
     `新鲜度：${S.fresh >= 99 ? '不限' : (S.fresh === 0 ? '仅当日' : `近 ${S.fresh + 1} 日`)}　·　` +
     `${S.validOnly ? '仅未失效' : '含已失效'}　·　${S.trendOnly ? '仅趋势背驰' : '全部背驰'}` +
     `　·　点任意一行看该票结构`;
@@ -259,6 +264,7 @@ function bind() {
   const on = (id, ev, fn) => document.getElementById(id).addEventListener(ev, fn);
   on('fresh', 'change', e => { S.fresh = +e.target.value; refresh(); });
   on('amt', 'change', e => { S.amt = +e.target.value; refresh(); });
+  on('board', 'change', e => { S.board = e.target.value; refresh(); });
   on('ind', 'change', e => { S.ind = e.target.value; refresh(); });
   on('q', 'input', e => { S.q = e.target.value.trim(); refresh(); });
   on('validOnly', 'change', e => { S.validOnly = e.target.checked; refresh(); });
@@ -266,10 +272,11 @@ function bind() {
   on('exclBJ', 'change', e => { S.exclBJ = e.target.checked; refresh(); });
   on('trendOnly', 'change', e => { S.trendOnly = e.target.checked; refresh(); });
   on('reset', 'click', () => {
-    Object.assign(S, { tab: 0, fresh: 0, validOnly: true, amt: 0, ind: '', q: '',
+    Object.assign(S, { tab: 0, fresh: 0, validOnly: true, amt: 0, board: '', ind: '', q: '',
                        exclST: true, exclBJ: false, trendOnly: false, sort: 'a', dir: -1 });
     document.getElementById('fresh').value = '0';
     document.getElementById('amt').value = '0';
+    document.getElementById('board').value = '';
     document.getElementById('q').value = '';
     for (const [id, v] of [['validOnly', true], ['exclST', true], ['exclBJ', false], ['trendOnly', false]])
       document.getElementById(id).checked = v;
