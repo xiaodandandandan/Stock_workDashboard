@@ -80,6 +80,9 @@ tr:hover .name .go{opacity:1}
 .fr{font-size:11.5px;color:var(--tx3);white-space:nowrap}
 .fr.new{color:var(--up);font-weight:600}
 .num{font-variant-numeric:tabular-nums;text-align:right}
+.scan-return-cell{width:166px;min-width:166px;white-space:nowrap}
+td.scan-return-cell{font-size:14px;font-weight:600}
+.tracking-cell{width:98px;max-width:98px;padding-left:5px;padding-right:5px;white-space:nowrap}
 .tablewrap{max-height:640px;overflow:auto;border-radius:8px}
 .empty{padding:40px;text-align:center;color:var(--tx3)}
 footer{margin-top:18px;font-size:12px;color:var(--tx3);line-height:1.7}

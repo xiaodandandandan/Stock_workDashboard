@@ -189,8 +189,8 @@ function renderTable(list) {
       <td class="num">${r.close != null ? (+r.close).toFixed(2) : '—'}</td>
       <td class="num" title="${esc(q?.date || '行情尚未获取')}">${q?.price != null ? (+q.price).toFixed(2) : '—'}<span class="quote-time">${esc(q?.date || '')}</span></td>
       <td class="num">${signedPrice(q?.change)}</td>
-      <td class="num" title="${esc('扫描基准：' + D.generated + '，价格 ' + r.close + '；报价截至：' + (q?.date || '尚未获取'))}">${signedPrice(q?.change_pct, true)}</td>
-      <td>${trackingLabel(r, q)}</td>
+      <td class="num scan-return-cell" title="${esc('扫描基准：' + D.generated + '，价格 ' + r.close + '；报价截至：' + (q?.date || '尚未获取'))}">${signedPrice(q?.change_pct, true)}</td>
+      <td class="tracking-cell">${trackingLabel(r, q)}</td>
       <td class="num">${(+r.amt).toFixed(2)}</td>
     </tr>`;
   }).join('');
