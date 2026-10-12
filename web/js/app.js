@@ -189,7 +189,7 @@ function renderTable(list) {
       <td class="num">${r.close != null ? (+r.close).toFixed(2) : '—'}</td>
       <td class="num" title="${esc(q?.date || '行情尚未获取')}">${q?.price != null ? (+q.price).toFixed(2) : '—'}<span class="quote-time">${esc(q?.date || '')}</span></td>
       <td class="num">${signedPrice(q?.change)}</td>
-      <td class="num">${signedPrice(q?.change_pct, true)}</td>
+      <td class="num" title="${esc('扫描基准：' + D.generated + '，价格 ' + r.close + '；报价截至：' + (q?.date || '尚未获取'))}">${signedPrice(q?.change_pct, true)}</td>
       <td>${trackingLabel(r, q)}</td>
       <td class="num">${(+r.amt).toFixed(2)}</td>
     </tr>`;
@@ -338,6 +338,11 @@ function scheduleTracking() {
   clearTimeout(quoteTimer);
   quoteTimer = setTimeout(() => updateTracking(), 200);
 }
+function syncDrawerTracking() {
+  if (typeof Drawer === 'undefined' || !Drawer.openCode || !Drawer.updateTracking) return;
+  const symbol = normalizeSymbol(Drawer.openCode);
+  Drawer.updateTracking(symbol, quotes[symbol], D.generated);
+}
 async function updateTracking(force = false) {
   if (scanLoading) return;
   const data = D, snapshot = loadedSnapshot;
@@ -355,6 +360,7 @@ async function updateTracking(force = false) {
     if (!trackingGate.isCurrent(ticket) || D !== data) return;
     quotes = { ...quotes, ...result.quotes };
     renderTable(sortedList());
+    syncDrawerTracking();
     const missing = Object.keys(result.errors || {}).length;
     status.textContent = `行情获取于 ${result.as_of} · 本页 ${codes.length} 只` +
       (missing ? ` · ${missing} 只未获取（显示 —）` : '') + ' · 每只报价时间见最新价';
@@ -363,6 +369,7 @@ async function updateTracking(force = false) {
     lastTrackingKey = ''; // allow the next filter change to retry
     quotes = {};
     renderTable(sortedList());
+    syncDrawerTracking();
     status.textContent = '行情更新失败：' + e.message + '，可点击“刷新行情”重试';
   } finally {
     if (trackingGate.isCurrent(ticket)) btn.disabled = false;

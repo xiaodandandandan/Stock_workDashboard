@@ -25,6 +25,7 @@ const Drawer = (() => {
   const reportGate = new RequestGate();
   let active = false;
   let opened = false;
+  let metaTail = '';
 
   const el = id => document.getElementById(id);
 
@@ -42,7 +43,8 @@ const Drawer = (() => {
     el('dwReport').textContent = '';
     el('dwBody').scrollTop = 0;
     syncFreqBtns();
-    el('dwMeta').innerHTML = trackingMetaHTML() + 'K 线载入中…';
+    metaTail = 'K 线载入中…';
+    renderMeta();
     el('dwCard').innerHTML = '';
     el('drawer').classList.add('on');
     el('drawer').setAttribute('aria-hidden', 'false');
@@ -58,6 +60,7 @@ const Drawer = (() => {
     clearChart();
     cur = null;
     cache = {};
+    metaTail = '';
     el('drawer').classList.remove('on');
     el('drawer').setAttribute('aria-hidden', 'true');
     Drawer.openCode = null;
@@ -94,7 +97,8 @@ const Drawer = (() => {
     el('dwReport').textContent = '';
     clearChart();
     el('dwCard').innerHTML = '';
-    el('dwMeta').innerHTML = trackingMetaHTML() + 'K 线载入中…';
+    metaTail = 'K 线载入中…';
+    renderMeta();
     try {
       const d = cache[f] || await API.stock(stock.symbol || stock.code, f, {}, ticket.signal);
       if (!active || !chartGate.isCurrent(ticket) || cur !== stock || freq !== f) return;
@@ -102,7 +106,8 @@ const Drawer = (() => {
       render(d);
     } catch (e) {
       if (!active || !chartGate.isCurrent(ticket)) return;
-      el('dwMeta').innerHTML = trackingMetaHTML();
+      metaTail = '';
+      renderMeta();
       el('dwCard').innerHTML = `<div class="dw-err">载入失败：${esc(e.message)}</div>`;
     }
   }
@@ -115,15 +120,13 @@ const Drawer = (() => {
     return cur?.scan_at ?
       `<span>跟踪扫描 ${esc(cur.scan_at)} · 扫描价 <b>${cur.close != null ? (+cur.close).toFixed(2) : '—'}</b>` +
       ` · 最新报价 <b>${q?.price != null ? (+q.price).toFixed(2) : '—'}</b>` +
-      ` · 扫描后涨跌幅 <span class="${color}">${change != null ? (change > 0 ? '+' : '') + change.toFixed(2) + '%' : '—'}</span>` +
+      ` · 扫描后至今涨跌幅 <span class="${color}">${change != null ? (change > 0 ? '+' : '') + change.toFixed(2) + '%' : '—'}</span>` +
       `${q?.buy_stop_breached ? ' · 触及原买点失效位' : ''} · 报价时间 ${esc(q?.date || '未获取')}</span>` : '';
   }
-  function render(d) {
-    // 头部信息
-    el('dwInd').textContent = d.industry || '';
-    const st = d.structure || {};
-    el('dwMeta').innerHTML =
-      trackingMetaHTML() + `K 线末价 <b>${d.close != null ? (+d.close).toFixed(2) : '—'}</b>` +
+  function renderMeta(d) {
+    if (d) {
+      const st = d.structure || {};
+      metaTail = `K 线末价 <b>${d.close != null ? (+d.close).toFixed(2) : '—'}</b>` +
       `　估算成交额 <b>${(+d.amt).toFixed(2)} 亿</b>` +
       `　${esc(d.unit)} <b>${d.bars}</b> 根` +
       (st.ZD != null
@@ -132,6 +135,25 @@ const Drawer = (() => {
       `　<span class="badge ${d.cached ? '' : 'hot'}">${d.cached ? '缓存命中' : '实时取数'}</span>` +
       `<span class="badge">${d.elapsed_ms} ms</span>` +
       (d.in_scan ? '' : `<span class="badge">不在当日榜单</span>`);
+    }
+    el('dwMeta').innerHTML = trackingMetaHTML() + metaTail;
+  }
+
+  function updateTracking(symbol, quote, scanAt) {
+    if (!active || !cur || scanAt !== cur.scan_at) return;
+    try {
+      if (normalizeSymbol(symbol) !== normalizeSymbol(cur.symbol || cur.code)) return;
+    } catch {
+      return;
+    }
+    cur.tracking = quote;
+    renderMeta();
+  }
+
+  function render(d) {
+    // 头部信息
+    el('dwInd').textContent = d.industry || '';
+    renderMeta(d);
 
     el('dwCard').innerHTML = cardHTML(d);
     renderLayers();
@@ -378,5 +400,5 @@ const Drawer = (() => {
   }
 
   bindOnce();
-  return { open, close, snapshot, syncLayers, paint, LAYER_LABELS, openCode: null };
+  return { open, close, updateTracking, snapshot, syncLayers, paint, LAYER_LABELS, openCode: null };
 })();

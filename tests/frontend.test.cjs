@@ -22,7 +22,7 @@ function payload(symbol = 'sh600000', freq = 'day', n = 150, close = 1000) {
 
 function environment() {
   const elements = new Map(), pending = [], frames = new Map();
-  let lastDraw = null, nextFrame = 1;
+  let lastDraw = null, drawCount = 0, nextFrame = 1;
   class Element {
     constructor(id) {
       this.id = id; this.style = {}; this.events = {}; this.dataset = {}; this.disabled = false;
@@ -50,7 +50,7 @@ function environment() {
     document: { getElementById: el, createElement: () => new Element(''), addEventListener() {} },
     window: { innerHeight: 1000, addEventListener() {} },
     API: { stock: (code, freq, opts, signal) => new Promise((resolve, reject) => pending.push({ code, freq, opts, signal, resolve, reject })) },
-    esc: String, fmtDate: String, setupCanvas: () => ({}), draw: (_ctx, d) => { lastDraw = d; },
+    esc: String, fmtDate: String, setupCanvas: () => ({}), draw: (_ctx, d) => { lastDraw = d; drawCount++; },
     bindTip: () => ({ update() {}, hide() {} }),
     requestAnimationFrame: fn => { const id = nextFrame++; frames.set(id, fn); return id; },
     cancelAnimationFrame: id => frames.delete(id), layout: () => ({ PL: 52, bw: 10 }),
@@ -59,6 +59,7 @@ function environment() {
   return {
     ctx, el, pending, Drawer: vm.runInContext('Drawer', ctx), Zoom: vm.runInContext('Zoom', ctx),
     draw: () => lastDraw,
+    drawCount: () => drawCount,
     pendingFrames: () => frames.size,
     flushFrames: () => {
       const batch = [...frames.values()]; frames.clear();
@@ -124,11 +125,72 @@ test('drawer shows scan tracking while chart analysis is pending or unavailable'
   const e = environment();
   e.Drawer.open({ code: '600000', scan_at: '2026-10-09 15:00:00', close: 10,
     tracking: { price: 9, change_pct: -10, date: '2026-10-12 15:00:00', buy_stop_breached: true } });
-  assert.match(e.el('dwMeta').innerHTML, /扫描后涨跌幅.*-10\.00%/);
+  assert.match(e.el('dwMeta').innerHTML, /扫描后至今涨跌幅.*-10\.00%/);
   assert.match(e.el('dwMeta').innerHTML, /触及原买点失效位/);
   e.pending.shift().reject(new Error('chart unavailable')); await tick();
   assert.match(e.el('dwMeta').innerHTML, /跟踪扫描 2026-10-09/);
   assert.match(e.el('dwCard').innerHTML, /chart unavailable/);
+});
+
+test('drawer receives quotes before and after chart load without refetching or redrawing', async () => {
+  const e = environment(), scanAt = '2026-10-09 15:00:00';
+  e.Drawer.open({ code: '600000', scan_at: scanAt, close: 10 });
+  assert.match(e.el('dwMeta').innerHTML, /扫描后至今涨跌幅.*—/);
+  const chartRequest = e.pending.shift();
+  const quote = { price: 12, change_pct: 20, date: '2026-10-12 15:00:00', buy_stop_breached: false };
+  e.Drawer.updateTracking('sh600000', quote, scanAt);
+  assert.match(e.el('dwMeta').innerHTML, /price-up">\+20\.00%/);
+  assert.match(e.el('dwMeta').innerHTML, /K 线载入中/);
+  assert.equal(e.pending.length, 0);
+  assert.equal(e.drawCount(), 0);
+  e.Drawer.updateTracking('sh600000', { ...quote, price: 9, change_pct: -10 }, scanAt);
+  assert.match(e.el('dwMeta').innerHTML, /price-down">-10\.00%/);
+  chartRequest.resolve(payload()); await tick();
+  assert.match(e.el('dwMeta').innerHTML, /price-down">-10\.00%/);
+  assert.match(e.el('dwMeta').innerHTML, /K 线末价/);
+  const draws = e.drawCount();
+  assert.equal(draws, 1);
+  e.Drawer.updateTracking('sh600000', { ...quote, price: 10.5, change_pct: 5 }, scanAt);
+  assert.match(e.el('dwMeta').innerHTML, /price-up">\+5\.00%/);
+  assert.match(e.el('dwMeta').innerHTML, /K 线末价/);
+  assert.equal(e.pending.length, 0);
+  assert.equal(e.drawCount(), draws);
+  e.Drawer.updateTracking('sh600000', undefined, scanAt);
+  assert.match(e.el('dwMeta').innerHTML, /扫描后至今涨跌幅.*—/);
+  assert.match(e.el('dwMeta').innerHTML, /报价时间 未获取/);
+  assert.match(e.el('dwMeta').innerHTML, /K 线末价/);
+  assert.equal(e.drawCount(), draws);
+});
+
+test('drawer tracking updates preserve chart failure state', async () => {
+  const e = environment(), scanAt = '2026-10-09 15:00:00';
+  e.Drawer.open({ code: '600000', symbol: 'sh600000', scan_at: scanAt, close: 10 });
+  e.pending.shift().reject(new Error('chart unavailable')); await tick();
+  const card = e.el('dwCard').innerHTML;
+  e.Drawer.updateTracking('sh600000', { price: 9, change_pct: -10,
+    date: '2026-10-12 15:00:00', buy_stop_breached: true }, scanAt);
+  assert.match(e.el('dwMeta').innerHTML, /price-down">-10\.00%/);
+  assert.match(e.el('dwMeta').innerHTML, /触及原买点失效位/);
+  assert.doesNotMatch(e.el('dwMeta').innerHTML, /K 线载入中|K 线末价/);
+  assert.equal(e.el('dwCard').innerHTML, card);
+  assert.equal(e.pending.length, 0);
+  assert.equal(e.drawCount(), 0);
+});
+
+test('drawer ignores tracking for another exchange, scan, invalid symbol, or closed view', () => {
+  const e = environment(), scanAt = '2026-10-09 15:00:00';
+  e.Drawer.open({ code: '000001', symbol: 'sh000001', scan_at: scanAt, close: 3000 });
+  const before = e.el('dwMeta').innerHTML;
+  const quote = { price: 3300, change_pct: 10, date: '2026-10-12 15:00:00' };
+  for (const [symbol, stamp] of [['sz000001', scanAt], ['sh000001', '2026-10-10 15:00:00'],
+                               ['invalid', scanAt]]) {
+    e.Drawer.updateTracking(symbol, quote, stamp);
+    assert.equal(e.el('dwMeta').innerHTML, before);
+  }
+  e.Drawer.close();
+  e.Drawer.updateTracking('sh000001', quote, scanAt);
+  assert.equal(e.el('dwMeta').innerHTML, before);
+  assert.equal(e.drawCount(), 0);
 });
 
 test('scan header exposes failed and partial industry data', () => {
