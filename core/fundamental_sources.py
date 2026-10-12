@@ -14,7 +14,19 @@ DATACENTER = "https://datacenter-web.eastmoney.com/api/data/v1/get?"
 ANNOUNCEMENTS = "https://np-anotice-stock.eastmoney.com/api/security/ann?"
 MEDIA_SEARCH = "https://search-api-web.eastmoney.com/search/jsonp?"
 REPORTS = ("RPT_F10_FINANCE_MAINFINADATA", "RPT_DMSK_FN_INCOME",
-           "RPT_DMSK_FN_BALANCE", "RPT_DMSK_FN_CASHFLOW")
+           "RPT_F10_FINANCE_GBALANCE", "RPT_DMSK_FN_CASHFLOW")
+BALANCE_REPORTS = (REPORTS[2], "RPT_F10_FINANCE_BBALANCE", "RPT_F10_FINANCE_IBALANCE",
+                   "RPT_F10_FINANCE_SBALANCE")
+BUSINESS_REPORT = "RPT_F10_FN_MAINOP"
+FIELD_SOURCES = {
+    "net_profit_excl": "MAIN.KCFJCXSYJLR / INCOME.DEDUCT_PARENT_NETPROFIT",
+    "parent_equity": "完整资产负债表.TOTAL_PARENT_EQUITY（归属于母公司，不用合并权益替代）",
+    "goodwill": "完整资产负债表.GOODWILL", "inventory": "完整资产负债表.INVENTORY",
+    "accounts_receivable": "完整资产负债表.ACCOUNTS_RECE", "cash": "完整资产负债表.MONETARYFUNDS",
+    "undistributed_profit": "完整资产负债表.UNASSIGN_RPOFIT",
+    "financing_cashflow": "CASHFLOW.NETCASH_FINANCE", "operating_profit": "INCOME.OPERATE_PROFIT",
+    "operating_cost": "INCOME.OPERATE_COST",
+}
 
 
 class SourceError(RuntimeError):
@@ -98,6 +110,8 @@ def _report(symbol, report, size=8):
               "sortColumns": "SECUCODE" if report == "RPT_F10_ORG_BASICINFO" else "REPORT_DATE",
               "sortTypes": -1, "pageSize": size, "pageNumber": 1}
     body = json.loads(DS._get(DATACENTER + urlencode(params), DS.HDR_EM, timeout=8))
+    if isinstance(body, dict) and body.get("success") is False and body.get("message") == "返回数据为空":
+        return []
     if not isinstance(body, dict) or body.get("success") is not True:
         raise SourceError("%s 获取失败：%s" % (report, body.get("message", "响应无效")
                                                if isinstance(body, dict) else "响应无效"))
@@ -110,6 +124,17 @@ def _report(symbol, report, size=8):
                 or row.get("SECURITY_CODE") != symbol[2:]):
             raise SourceError("%s 返回交易所或代码与请求不一致" % report)
     return rows
+
+
+def _balance_rows(symbol):
+    # Provider financial statements differ for general companies, banks, insurers
+    # and securities firms. Only an explicit empty response triggers the next type;
+    # transport, schema or exchange failures must remain visible.
+    for report in BALANCE_REPORTS:
+        rows = _report(symbol, report, size=48)
+        if rows:
+            return [dict(row, _source_report=report) for row in rows]
+    return []
 
 
 def fetch_profile(symbol):
@@ -139,8 +164,10 @@ def fetch_profile(symbol):
 def fetch_financials(symbol):
     symbol = validate_symbol(symbol)
     tables, errors = {}, []
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        tasks = {report: pool.submit(_report, symbol, report) for report in REPORTS}
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        tasks = {report: (pool.submit(_balance_rows, symbol) if report == REPORTS[2]
+                          else pool.submit(_report, symbol, report, 48)) for report in REPORTS}
+        business_task = pool.submit(_business_segments, symbol)
         for report, task in tasks.items():
             try:
                 rows = task.result()
@@ -155,25 +182,36 @@ def fetch_financials(symbol):
                 tables[report] = by_date
             except Exception as exc:
                 errors.append("%s: %s" % (report, exc))
+        try:
+            business = business_task.result()
+        except Exception as exc:
+            business = {"report_date": None, "items": [], "periods": [], "source": "东方财富财报主营构成",
+                        "url": _business_url(symbol), "status": "failed", "error": str(exc)}
+            errors.append("主营业务构成: %s" % exc)
     if not tables:
         raise SourceError("；".join(errors))
-    dates = sorted({date for table in tables.values() for date in table}, reverse=True)[:8]
+    today = _now().strftime("%Y-%m-%d")
+    dates = sorted({date for table in tables.values() for date in table if date <= today}, reverse=True)
     reports = []
     for date in dates:
         main, income, balance, cashflow = [tables.get(report, {}).get(date, {}) for report in REPORTS]
-        currency = main.get("CURRENCY")
+        currencies = {row.get("CURRENCY") for row in (main, income, balance, cashflow)
+                      if row.get("CURRENCY") is not None}
+        currency = next(iter(currencies), None) if len(currencies) <= 1 else "mixed"
         if currency not in (None, "CNY"):
             errors.append("%s 的币种不是 CNY，金额未展示" % date)
         def amount(field, table):
             return _number(table.get(field)) if currency in (None, "CNY") else None
         revenue = amount("TOTALOPERATEREVE", main)
         net_profit = amount("PARENTNETPROFIT", main)
+        net_profit_excl = amount("KCFJCXSYJLR", main)
         reports.append({
             "report_date": date,
             "announced_date": _date(main.get("NOTICE_DATE") or income.get("NOTICE_DATE")
                                     or balance.get("NOTICE_DATE") or cashflow.get("NOTICE_DATE")),
             "revenue": revenue if revenue is not None else amount("TOTAL_OPERATE_INCOME", income),
             "net_profit": net_profit if net_profit is not None else amount("PARENT_NETPROFIT", income),
+            "net_profit_excl": net_profit_excl if net_profit_excl is not None else amount("DEDUCT_PARENT_NETPROFIT", income),
             "revenue_yoy": _number(main.get("TOTALOPERATEREVETZ")),
             "net_profit_yoy": _number(main.get("PARENTNETPROFITTZ")),
             "operating_cashflow": amount("NETCASH_OPERATE", cashflow),
@@ -181,9 +219,78 @@ def fetch_financials(symbol):
             "debt_ratio": _number(main.get("ZCFZL")), "eps": amount("EPSJB", main),
             "total_assets": amount("TOTAL_ASSETS", balance),
             "total_liabilities": amount("TOTAL_LIABILITIES", balance), "currency": currency or "CNY",
+            "parent_equity": amount("TOTAL_PARENT_EQUITY", balance),
+            "goodwill": amount("GOODWILL", balance), "inventory": amount("INVENTORY", balance),
+            "accounts_receivable": amount("ACCOUNTS_RECE", balance),
+            "cash": amount("MONETARYFUNDS", balance), "undistributed_profit": amount("UNASSIGN_RPOFIT", balance),
+            "financing_cashflow": amount("NETCASH_FINANCE", cashflow),
+            "operating_profit": amount("OPERATE_PROFIT", income), "operating_cost": amount("OPERATE_COST", income),
+            "source_reports": {"main": REPORTS[0], "income": REPORTS[1],
+                               "balance": balance.get("_source_report", REPORTS[2]), "cashflow": REPORTS[3]},
         })
-    return _section({"reports": reports}, _finance_url(symbol),
+    annuals = [report for report in reports if report["report_date"].endswith("-12-31")
+               and tables.get(REPORTS[0], {}).get(report["report_date"], {}).get("REPORT_TYPE") in (None, "年报")][:10]
+    data = {"reports": reports[:8], "annual_reports": annuals, "business_segments": business,
+            "annual_coverage": {"available_years": len(annuals), "requested_years": 10,
+                                "oldest_period": annuals[-1]["report_date"] if annuals else None,
+                                "latest_period": annuals[0]["report_date"] if annuals else None},
+            "field_sources": dict(FIELD_SOURCES),
+            "verification": {"status": "pending", "note": "东方财富结构化财报数据，尚未逐项回年报原文核验。"}}
+    return _section(data, _finance_url(symbol),
                     status="partial" if errors else ("ok" if reports else "empty"), errors=errors)
+
+
+def _business_url(symbol):
+    return "https://emweb.securities.eastmoney.com/PC_HSF10/BusinessAnalysis/Index?" + urlencode(
+        {"type": "web", "code": symbol.upper()})
+
+
+def _business_segments(symbol):
+    rows = _report(symbol, BUSINESS_REPORT, size=200)
+    by_date = {}
+    for row in rows:
+        date = _date(row.get("REPORT_DATE"))
+        if not date:
+            raise SourceError("主营构成报告期无效")
+        if date <= _now().strftime("%Y-%m-%d"):
+            by_date.setdefault(date, []).append(row)
+    base = {"source": "东方财富财报主营构成", "url": _business_url(symbol),
+            "source_fields": {"name": "ITEM_NAME", "revenue": "MAIN_BUSINESS_INCOME",
+                              "gross_margin": "GROSS_RPOFIT_RATIO × 100", "share_pct": "MBI_RATIO × 100"}}
+    if not by_date:
+        return dict(base, report_date=None, items=[], periods=[], status="empty")
+    dates = sorted(by_date, reverse=True)
+    present = {str(row.get("MAINOP_TYPE")) for row in by_date[dates[0]]}
+    selected_type = next((kind for kind in ("2", "1", "3") if kind in present), None)
+    if selected_type is None:
+        return dict(base, report_date=dates[0], items=[], periods=[], status="empty",
+                    note="未提供可识别的财报分产品、分行业或分地区构成。")
+    classification = {"2": "分产品", "1": "分行业", "3": "分地区"}[selected_type]
+    periods, skipped = [], []
+    for date in dates[:4]:
+        items, names = [], set()
+        for row in by_date[date]:
+            if str(row.get("MAINOP_TYPE")) != selected_type:
+                continue
+            name = _text(row.get("ITEM_NAME"), 160)
+            if not name:
+                raise SourceError("主营构成缺少业务名称")
+            if name in names:
+                raise SourceError("同一报告期与分类包含重复主营业务项")
+            names.add(name)
+            margin, share = _number(row.get("GROSS_RPOFIT_RATIO")), _number(row.get("MBI_RATIO"))
+            items.append({"name": name, "revenue": _number(row.get("MAIN_BUSINESS_INCOME")),
+                          "gross_margin": margin * 100 if margin is not None and math.isfinite(margin * 100) else None,
+                          "share_pct": share * 100 if share is not None and math.isfinite(share * 100) else None})
+        if items:
+            items.sort(key=lambda item: (item["revenue"] is not None, item["revenue"] or 0), reverse=True)
+            periods.append({"report_date": date, "items": items, "classification": classification})
+        else:
+            skipped.append(date)
+    latest = periods[0]
+    return dict(base, report_date=latest["report_date"], items=latest["items"], periods=periods,
+                classification=classification, status="ok", skipped_periods=skipped,
+                note="各期采用同一财报构成分类，旧期无相同分类则跳过；占比和毛利来自源字段，未读取年报原文。")
 
 
 def _announcements(symbol, now):

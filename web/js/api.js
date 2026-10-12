@@ -93,7 +93,12 @@ const API = {
   async fundamentals(code, refresh = false, signal) {
     const symbol = normalizeSymbol(code);
     const body = await this.request('/api/fundamentals', { code: symbol, refresh: refresh ? 1 : 0 }, { signal });
-    if (!isRecord(body) || body.symbol !== symbol || !isRecord(body.sections) ||
+    if (!isRecord(body) || body.schema !== 2 || body.symbol !== symbol || !isRecord(body.sections) || !isRecord(body.report) ||
+        !Array.isArray(body.report.kpis) || !Array.isArray(body.report.conclusions) ||
+        !Array.isArray(body.report.risk_exposure) || !Array.isArray(body.report.regulatory_checks) ||
+        !Array.isArray(body.report.cash_quality) || !Array.isArray(body.report.scenarios) ||
+        !Array.isArray(body.report.checklist) || !Array.isArray(body.report.valuation_notes) ||
+        !isRecord(body.report.verification) || !Array.isArray(body.report.verification.links) ||
         !Array.isArray(body.summary) || !Array.isArray(body.sources) ||
         ['profile', 'financials', 'valuation', 'news'].some(key => {
           const section = /** @type {Record<string, unknown>} */ (body.sections)[key];

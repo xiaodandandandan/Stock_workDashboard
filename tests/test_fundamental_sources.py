@@ -150,6 +150,117 @@ class FundamentalSourceTests(unittest.TestCase):
         self.assertIsNone(result["data"]["reports"][0]["revenue"])
         self.assertIsNone(result["data"]["reports"][0]["roe"])
 
+    def test_extended_values_use_deducted_parent_profit_and_parent_equity_not_total_equity(self):
+        date = "2025-12-31"
+        tables = {
+            sources.REPORTS[0]: [fact(REPORT_DATE=date, REPORT_TYPE="年报", CURRENCY="CNY",
+                                      PARENTNETPROFIT=20, KCFJCXSYJLR=-5)],
+            sources.REPORTS[1]: [fact(REPORT_DATE=date, OPERATE_PROFIT=12, OPERATE_COST=30)],
+            sources.REPORTS[2]: [fact(REPORT_DATE=date, TOTAL_ASSETS=500, TOTAL_LIABILITIES=100,
+                                      TOTAL_EQUITY=400, TOTAL_PARENT_EQUITY=300, GOODWILL=40,
+                                      INVENTORY=50, ACCOUNTS_RECE=60, MONETARYFUNDS=70, UNASSIGN_RPOFIT=-80)],
+            sources.REPORTS[3]: [fact(REPORT_DATE=date, NETCASH_OPERATE=-10, NETCASH_FINANCE=15)],
+        }
+        with patch.object(sources.DS, "_get", side_effect=financial_get(tables)):
+            data = sources.fetch_financials("sh600519")["data"]
+        latest = data["reports"][0]
+        self.assertEqual((latest["net_profit"], latest["net_profit_excl"]), (20, -5))
+        self.assertEqual(latest["parent_equity"], 300)
+        self.assertNotEqual(latest["parent_equity"], latest["total_assets"] - latest["total_liabilities"])
+        self.assertEqual((latest["operating_cashflow"], latest["financing_cashflow"]), (-10, 15))
+        for key, expected in {"goodwill": 40, "inventory": 50, "accounts_receivable": 60,
+                              "cash": 70, "undistributed_profit": -80, "operating_profit": 12,
+                              "operating_cost": 30}.items():
+            self.assertEqual(latest[key], expected)
+        self.assertEqual(data["annual_reports"][0], latest)
+        self.assertEqual(data["verification"]["status"], "pending")
+        self.assertIn("TOTAL_PARENT_EQUITY", data["field_sources"]["parent_equity"])
+
+    def test_missing_parent_equity_is_unknown_even_with_assets_liabilities_and_total_equity(self):
+        tables = {sources.REPORTS[0]: [fact(REPORT_DATE="2025-12-31", PARENTNETPROFIT=0)],
+                  sources.REPORTS[1]: [fact(REPORT_DATE="2025-12-31", DEDUCT_PARENT_NETPROFIT=0)],
+                  sources.REPORTS[2]: [fact(REPORT_DATE="2025-12-31", TOTAL_ASSETS=500,
+                                            TOTAL_LIABILITIES=100, TOTAL_EQUITY=400, GOODWILL=None)]}
+        with patch.object(sources.DS, "_get", side_effect=financial_get(tables)):
+            latest = sources.fetch_financials("sh600519")["data"]["reports"][0]
+        self.assertEqual(latest["net_profit_excl"], 0)
+        self.assertIsNone(latest["parent_equity"])
+        self.assertIsNone(latest["goodwill"])
+        self.assertIsNone(latest["cash"])
+        self.assertIsNone(latest["financing_cashflow"])
+
+    def test_annual_series_is_separate_ten_completed_years_and_requests_48_periods_once(self):
+        all_rows = [fact(REPORT_DATE="%d-%s" % (year, period),
+                         REPORT_TYPE="年报" if period == "12-31" else "中报",
+                         TOTALOPERATEREVE=year, PARENTNETPROFIT=year - 2000)
+                    for year in range(2014, 2026) for period in ("06-30", "12-31")]
+        all_rows += [fact(REPORT_DATE="2026-12-31", REPORT_TYPE="年报", TOTALOPERATEREVE=999)]
+        tables = {sources.REPORTS[0]: all_rows}
+        with patch.object(sources.DS, "_get", side_effect=financial_get(tables)) as get:
+            data = sources.fetch_financials("sh600519")["data"]
+        self.assertEqual(len(data["reports"]), 8)
+        self.assertEqual(len(data["annual_reports"]), 10)
+        self.assertEqual([r["report_date"] for r in data["annual_reports"]],
+                         ["%d-12-31" % year for year in range(2025, 2015, -1)])
+        self.assertEqual(data["annual_coverage"]["available_years"], 10)
+        queries = [parse_qs(urlparse(call.args[0]).query) for call in get.call_args_list]
+        main_queries = [q for q in queries if q["reportName"] == [sources.REPORTS[0]]]
+        self.assertEqual(len(main_queries), 1)
+        self.assertEqual(main_queries[0]["pageSize"], ["48"])
+
+    def test_explicit_fourth_quarter_report_cannot_be_presented_as_a_complete_annual_report(self):
+        tables = {sources.REPORTS[0]: [fact(REPORT_DATE="2025-12-31", REPORT_TYPE="四季报"),
+                                       fact(REPORT_DATE="2024-12-31", REPORT_TYPE="年报")]}
+        with patch.object(sources.DS, "_get", side_effect=financial_get(tables)):
+            data = sources.fetch_financials("sh600519")["data"]
+        self.assertEqual([r["report_date"] for r in data["annual_reports"]], ["2024-12-31"])
+
+    def test_full_bank_statement_maps_parent_equity_and_keeps_bank_cash_as_unknown(self):
+        tables = {sources.REPORTS[0]: [fact("sz000001", REPORT_DATE="2026-06-30")],
+                  sources.BALANCE_REPORTS[1]: [fact("sz000001", REPORT_DATE="2026-06-30",
+                        TOTAL_PARENT_EQUITY=300, TOTAL_EQUITY=350, GOODWILL=50, CASH_DEPOSIT_PBC=100)]}
+        with patch.object(sources.DS, "_get", side_effect=financial_get(tables)):
+            latest = sources.fetch_financials("sz000001")["data"]["reports"][0]
+        self.assertEqual(latest["parent_equity"], 300)
+        self.assertEqual(latest["goodwill"], 50)
+        self.assertIsNone(latest["cash"])
+        self.assertEqual(latest["source_reports"]["balance"], sources.BALANCE_REPORTS[1])
+
+    def test_business_segments_use_one_dimension_across_periods_and_convert_ratios(self):
+        dates = ["2026-06-30", "2025-12-31", "2025-06-30", "2024-12-31"]
+        segments = [fact(REPORT_DATE=date, MAINOP_TYPE=kind, ITEM_NAME=name,
+                         MAIN_BUSINESS_INCOME=income, MBI_RATIO=share, GROSS_RPOFIT_RATIO=margin)
+                    for date, kind, name, income, share, margin in [
+                        (dates[0], "2", "产品甲", 90, .9, .5), (dates[0], "2", "产品乙", 10, .1, -.2),
+                        (dates[0], "1", "制造业", 100, 1, .43), (dates[0], "3", "国内", 100, 1, .43),
+                        (dates[1], "2", "产品甲", 60, .6, .3), (dates[1], "2", "产品乙", 40, .4, None),
+                        (dates[2], "3", "国内", 100, 1, .2), (dates[3], "2", "产品甲", 80, 1, .25)]]
+        with patch.object(sources.DS, "_get", side_effect=financial_get({sources.BUSINESS_REPORT: segments})):
+            business = sources.fetch_financials("sh600519")["data"]["business_segments"]
+        self.assertEqual(business["classification"], "分产品")
+        self.assertEqual([p["report_date"] for p in business["periods"]], [dates[0], dates[1], dates[3]])
+        self.assertEqual(business["skipped_periods"], [dates[2]])
+        self.assertEqual([i["name"] for i in business["items"]], ["产品甲", "产品乙"])
+        self.assertEqual(sum(i["share_pct"] for i in business["items"]), 100)
+        self.assertEqual(business["items"][0]["gross_margin"], 50)
+        self.assertEqual(business["items"][1]["gross_margin"], -20)
+        self.assertIsNone(business["periods"][1]["items"][1]["gross_margin"])
+
+    def test_business_empty_failure_and_duplicate_do_not_hide_financial_reports(self):
+        main = [fact(REPORT_DATE="2026-06-30", TOTALOPERATEREVE=100)]
+        with patch.object(sources.DS, "_get", side_effect=financial_get({sources.REPORTS[0]: main})):
+            data = sources.fetch_financials("sh600519")["data"]
+        self.assertEqual(data["business_segments"]["status"], "empty")
+        self.assertEqual(data["reports"][0]["revenue"], 100)
+        duplicate = fact(REPORT_DATE="2026-06-30", MAINOP_TYPE="2", ITEM_NAME="重复产品", MAIN_BUSINESS_INCOME=100)
+        for value in (TimeoutError("segments offline"), [duplicate, duplicate]):
+            with self.subTest(value=value), patch.object(sources.DS, "_get", side_effect=financial_get(
+                    {sources.REPORTS[0]: main, sources.BUSINESS_REPORT: value})):
+                result = sources.fetch_financials("sh600519")
+            self.assertEqual(result["status"], "partial")
+            self.assertEqual(result["data"]["business_segments"]["status"], "failed")
+            self.assertEqual(result["data"]["reports"][0]["revenue"], 100)
+
     def test_news_preserves_actual_publication_time_and_provider_summary(self):
         with patch.object(sources.DS, "_get", side_effect=news_get([announcement()], [article()])):
             result = sources.fetch_news("sh600519")

@@ -59,8 +59,22 @@ interface FundamentalSection {
   error: string; as_of: string; url: string; source: string; partial?: boolean; errors?: string[];
 }
 interface FundamentalPayload {
+  schema: 2;
   symbol: SymbolId; name: string; generated: string; status: 'ok' | 'partial' | 'empty' | 'failed';
   cache: { hit: boolean; ttl_seconds: number; saved_at: string; expires_at: string };
   sections: Record<'profile' | 'financials' | 'valuation' | 'news', FundamentalSection>;
   summary: string[]; sources: { label: string; url: string }[];
+  report: FundamentalReport;
+}
+interface FundamentalReport {
+  board: 'main' | 'star' | 'growth' | 'bse'; label: string; latest_report_date: string | null; headline: string;
+  verification: { status: 'pending'; notice: string; links: { label: string; url: string }[] };
+  kpis: { label: string; value: number | null; unit: string; field: string; report_date: string }[];
+  conclusions: { title: string; evidence: string; interpretation: string; direction: string; kind: string }[];
+  risk_exposure: { name: string; field: string; amount: number | null; ratio: number | null; status: string; status_label?: string; notice: string }[];
+  cash_quality: Record<string, unknown>[]; scenarios: { label: string; condition: string; path: string; judgement: string }[];
+  checklist: { label: string; value: string | number | null; evidence: string; status: string; status_label?: string }[];
+  valuation_notes: string[]; regulatory_checks: { label: string; status: 'pending'; evidence: string; url: string }[];
+  annual_coverage: { count: number; start: string | null; end: string | null; target_years: number; missing_years: number[]; notice: string };
+  business_segments: Record<string, unknown>;
 }

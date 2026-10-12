@@ -178,6 +178,90 @@ class FundamentalsTests(unittest.TestCase):
         self.assertEqual([r["report_date"] for r in data["reports"]], ["2026-06-30", "2025-06-30"])
         self.assertEqual(data["rejected_reports"], 3)
 
+    def test_extended_financial_fields_and_complete_annual_periods_are_normalized(self):
+        section = source_section("financials", "sh600000")
+        current = section["data"]["reports"][0]
+        current.update(net_profit_excl="-5000", parent_equity="3000000", goodwill="100000",
+                       inventory="250000", accounts_receivable=None, financing_cashflow="50000",
+                       cash="200000", undistributed_profit="-10000", operating_profit="20000",
+                       operating_cost="5000000", source_reports={"balance": "bank_B_table"})
+        annual = [dict(report("%s-12-31" % year), announced_date="%s-03-30" % (year + 1),
+                       net_profit_excl=str(year * 100), parent_equity=1_000_000)
+                  for year in range(2013, 2026)]
+        annual += [report("2026-06-30"), report("2027-12-31"),
+                   dict(report("2024-12-31"), announced_date="2024-08-20")]
+        section["data"].update(annual_reports=annual, field_sources={"parent_equity": "TOTAL_PARENT_EQUITY"})
+        self.sources["financials"].side_effect = None
+        self.sources["financials"].return_value = section
+        result = fundamental.fundamental_payload("sh600000")
+        data = result["sections"]["financials"]["data"]
+        self.assertEqual(result["schema"], 2)
+        self.assertEqual([r["report_date"] for r in data["annual_reports"]],
+                         ["%s-12-31" % year for year in range(2025, 2015, -1)])
+        self.assertEqual(data["rejected_annual_reports"], 3)
+        latest = data["reports"][0]
+        self.assertEqual(latest["net_profit_excl"], -5000)
+        self.assertEqual(latest["parent_equity"], 3_000_000)
+        self.assertEqual(latest["source_reports"], {"balance": "bank_B_table"})
+        self.assertEqual(data["field_sources"], {"parent_equity": "TOTAL_PARENT_EQUITY"})
+        self.assertEqual(result["report"]["annual_coverage"]["count"], 10)
+        self.assertEqual(result["report"]["verification"]["status"], "pending")
+
+    def test_annual_data_remains_usable_when_recent_quarter_section_is_empty(self):
+        section = source_section("financials", "sh600000")
+        section["data"]["reports"] = []
+        section["data"]["annual_reports"] = [dict(report("2025-12-31"), announced_date="2026-03-30", net_profit_excl=100)]
+        self.sources["financials"].side_effect = None
+        self.sources["financials"].return_value = section
+        result = fundamental.fundamental_payload("sh600000")
+        self.assertEqual(result["sections"]["financials"]["status"], "ok")
+        self.assertEqual(result["report"]["latest_report_date"], "2025-12-31")
+        self.assertEqual(result["report"]["kpis"][1]["value"], 100)
+
+    def test_business_mix_keeps_actual_period_and_one_classification_without_zero_filling(self):
+        section = source_section("financials", "sh600000")
+        business = {"report_date": "2025-12-31", "classification": "产品", "status": "ok", "source": "主营构成",
+                    "url": "https://example.com/business", "items": [{"name": "产品 A", "revenue": "100000",
+                                                                          "gross_margin": "3.53", "share_pct": "99.75"}],
+                    "periods": [{"report_date": "2024-12-31", "classification": "产品", "items": [{"name": "产品 A", "revenue": None}]},
+                                {"report_date": "2023-12-31", "classification": "行业", "items": [{"name": "贸易", "revenue": 50}]},
+                                {"report_date": "2027-06-30", "classification": "产品", "items": []}]}
+        section["data"]["business_segments"] = business
+        self.sources["financials"].side_effect = None
+        self.sources["financials"].return_value = section
+        result = fundamental.fundamental_payload("sh600000")
+        data = result["report"]["business_segments"]
+        self.assertEqual(result["report"]["latest_report_date"], "2026-06-30")
+        self.assertEqual(data["report_date"], "2025-12-31")
+        self.assertEqual([period["report_date"] for period in data["periods"]], ["2025-12-31", "2024-12-31"])
+        self.assertEqual(data["incomparable_periods"], 1)
+        self.assertEqual(data["items"][0]["share_pct"], 99.75)
+        self.assertEqual(data["items"][0]["gross_margin"], 3.53)
+        self.assertIsNone(data["periods"][1]["items"][0]["revenue"])
+
+    def test_report_cache_arrays_links_and_old_schema_force_clean_refetch(self):
+        fundamental.fundamental_payload("sh600000")
+        path = str(self.directory / "sh600000.json")
+        fields = ("kpis", "conclusions", "risk_exposure", "cash_quality", "scenarios", "checklist", "regulatory_checks", "valuation_notes")
+        for field in fields:
+            with self.subTest(field=field):
+                cached = fundamental.store.read_json(path)
+                cached["payload"]["report"][field] = [None]
+                fundamental.store.write_json(path, cached)
+                self.assertFalse(fundamental.fundamental_payload("sh600000")["cache"]["hit"])
+        for invalid in (None, [None], [{"label": "unsafe", "url": "javascript:alert(1)"}]):
+            with self.subTest(links=invalid):
+                cached = fundamental.store.read_json(path)
+                cached["payload"]["report"]["verification"]["links"] = invalid
+                fundamental.store.write_json(path, cached)
+                self.assertFalse(fundamental.fundamental_payload("sh600000")["cache"]["hit"])
+        cached = fundamental.store.read_json(path)
+        cached["schema"] = 1
+        fundamental.store.write_json(path, cached)
+        upgraded = fundamental.fundamental_payload("sh600000")
+        self.assertFalse(upgraded["cache"]["hit"])
+        self.assertEqual(upgraded["schema"], 2)
+
     def test_negative_profit_with_positive_yoy_does_not_become_profit_growth(self):
         signals = fundamental.financial_signals([report(profit=-400_000, yoy=25)])
         profit = next(signal for signal in signals if signal["title"] == "归母净利润")

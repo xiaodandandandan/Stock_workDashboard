@@ -576,11 +576,13 @@ test('all shipped classic scripts parse', () => {
 function fundamentalFixture(symbol = 'sh600000') {
   const section = data => ({ status: 'ok', data, error: '', as_of: '2026-10-12 15:00:00',
     url: 'https://data.eastmoney.com/', source: '东方财富' });
-  return { symbol, name: symbol, generated: '2026-10-12 15:00:00', status: 'ok', cache: { hit: false, ttl_seconds: 900 },
+  return { schema: 2, symbol, name: symbol, generated: '2026-10-12 15:00:00', status: 'ok', cache: { hit: false, ttl_seconds: 900 },
+    report: { label: '主板', headline: '净利润与扣非需对照核验', kpis: [], conclusions: [], risk_exposure: [], cash_quality: [],
+      scenarios: [], checklist: [], valuation_notes: [], regulatory_checks: [], verification: { notice: '未逐项核对年报原文', links: [] } },
     summary: ['已披露财报'], sources: [], sections: {
       profile: section({ name: symbol, description: '公司业务' }),
       financials: section({ reports: [{ report_date: '2026-06-30', announced_date: '2026-08-28',
-        revenue: 0, net_profit: -1000000, operating_cashflow: null }], signals: [] }),
+        revenue: 0, net_profit: -1000000, net_profit_excl: -1200000, operating_cashflow: null }], annual_reports: [], signals: [] }),
       valuation: section({ price: 10, pe_ttm: -5, pb: 1 }),
       news: section({ items: [], coverage: { announcements: { status: 'empty' }, media_news: { status: 'failed', error: 'news timeout' } } }),
     } };
@@ -598,6 +600,7 @@ function fundamentalEnvironment() {
     return elements.get(id);
   };
   const ctx = vm.createContext({ console, AbortController, URL, window: { Zoom: { isOpen: () => false } },
+    FundamentalCharts: { dispose() {}, render() {} },
     document: { getElementById: el, addEventListener: (name, fn) => { events[name] = fn; }, activeElement: null },
     esc: value => String(value ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])),
     API: { fundamentals: (symbol, refresh, signal) => new Promise(resolve => pending.push({ symbol, refresh, signal, resolve })) },
@@ -670,4 +673,127 @@ test('fundamental API enforces requested symbol and valid section contract', asy
   assert.equal(request.init.signal.aborted, true);
   const wrong = apiEnvironment(async () => ({ ok: true, json: async () => fundamentalFixture('sh600000') }));
   await assert.rejects(wrong.fundamentals('sz000001'), /股票或资料格式/);
+});
+
+function fundamentalChartEnvironment(loaded = false) {
+  const elements = new Map(), scripts = [], instances = [];
+  const el = id => {
+    if (!elements.has(id)) elements.set(id, { id, textContent: '', classList: { add() {}, remove() {} } });
+    return elements.get(id);
+  };
+  const engine = { init: node => {
+    const instance = { node, disposed: false, setOption(option) { this.option = option; }, resize() {}, dispose() { this.disposed = true; } };
+    instances.push(instance); return instance;
+  } };
+  const win = loaded ? { echarts: engine } : {};
+  const ctx = vm.createContext({ console, Promise, window: win,
+    document: { getElementById: el, head: { appendChild: script => scripts.push(script) }, createElement: () => ({ remove() {} }) } });
+  vm.runInContext(read('js/fundamental_charts.js'), ctx);
+  return { charts: vm.runInContext('FundamentalCharts', ctx), scripts, instances, win, engine, el };
+}
+
+function chartFixture() {
+  const data = fundamentalFixture();
+  data.sections.financials.data.annual_reports = [
+    { report_date: '2025-12-31', revenue: 200000000, net_profit: -10000000, net_profit_excl: null, parent_equity: -5000000, goodwill: 0, operating_cashflow: 0, financing_cashflow: null },
+    { report_date: '2026-06-30', revenue: 900000000, net_profit: 30000000 },
+    { report_date: '2024-12-31', revenue: 100000000, net_profit: 10000000, net_profit_excl: 5000000, parent_equity: 50000000, goodwill: 1000000, operating_cashflow: -2000000, financing_cashflow: 1000000 },
+  ];
+  data.sections.financials.data.business_segments = { report_date: '2025-12-31', items: [{ name: '业务A', revenue: 100000000, share_pct: 100, gross_margin: 30 }] };
+  data.report.risk_exposure = [{ name: '商誉', amount: 0 }, { name: '对外担保', amount: null }];
+  return data;
+}
+
+test('fundamental charts separate complete annual periods, units and missing financial values', () => {
+  const e = fundamentalChartEnvironment(), options = JSON.parse(JSON.stringify(e.charts.buildOptions(chartFixture())));
+  assert.deepEqual(options[1].option.xAxis.data, ['2024', '2025']);
+  assert.deepEqual(options[1].option.series[2].data, [.05, null]);
+  assert.equal(options[1].option.series[1].yAxisIndex, 1);
+  assert.equal(options[1].option.series[2].yAxisIndex, 1);
+  assert.ok(Number.isFinite(options[1].option.visualMap.min));
+  assert.ok(Number.isFinite(options[1].option.visualMap.max));
+  assert.equal(options[2].option.series[1].yAxisIndex, 1);
+  assert.equal(options[2].option.yAxis[1].max, undefined);
+  assert.equal(options[3].option.series[0].data[0].value, 0);
+  assert.equal(options[3].option.series[0].data[1].value, null);
+  assert.equal(options[3].option.series[0].markLine, undefined);
+  assert.equal(options[4].option.series[0].data[0].itemStyle.color, '#1a9c6b');
+  assert.equal(options[4].option.series[0].data[1].value, 0);
+  assert.match(options[0].caption, /1 个报告期/);
+  assert.equal(e.scripts.length, 0);
+});
+
+test('missing fundamental chart data stays explicitly empty instead of drawing artificial zeros', () => {
+  const e = fundamentalChartEnvironment();
+  assert.ok(e.charts.buildOptions(fundamentalFixture()).every(item => item.option === null));
+  assert.equal(e.scripts.length, 0);
+});
+
+test('missing intermediate financial years leave null gaps on a continuous annual axis', () => {
+  const e = fundamentalChartEnvironment(), data = chartFixture();
+  data.sections.financials.data.annual_reports = [{ report_date: '2023-12-31', revenue: 100000000, net_profit: 1000000, parent_equity: 10000000 },
+    { report_date: '2025-12-31', revenue: 200000000, net_profit: 2000000, parent_equity: 20000000 }];
+  const options = JSON.parse(JSON.stringify(e.charts.buildOptions(data)));
+  assert.deepEqual(options[1].option.xAxis.data, ['2023', '2024', '2025']);
+  assert.deepEqual(options[1].option.series[1].data, [.01, null, .02]);
+  assert.equal(options[1].option.series[1].connectNulls, false);
+  assert.equal(options[2].option.series[0].data[1].value, null);
+  assert.equal(options[4].option.series[0].data[1].value, null);
+  assert.match(options[1].caption, /完整年报 2 期/);
+});
+
+test('closing fundamentals while the chart library loads prevents detached chart initialization', async () => {
+  const e = fundamentalChartEnvironment();
+  assert.equal(e.scripts.length, 0);
+  const pending = e.charts.render(chartFixture());
+  assert.equal(e.scripts.length, 1);
+  assert.equal(e.scripts[0].src, 'vendor/echarts.min.js');
+  e.charts.dispose(); e.win.echarts = e.engine; e.scripts[0].onload();
+  await pending;
+  assert.equal(e.instances.length, 0);
+});
+
+test('fundamental chart instances are disposed on refresh or close and library failures preserve table access', async () => {
+  const e = fundamentalChartEnvironment(true);
+  await e.charts.render(chartFixture());
+  assert.equal(e.instances.length, 5);
+  e.charts.dispose(); assert.ok(e.instances.every(instance => instance.disposed));
+  const offline = fundamentalChartEnvironment();
+  const first = offline.charts.render(chartFixture());
+  offline.scripts[0].onerror(); await first;
+  assert.match(offline.el('chart2').textContent, /本地图表库加载失败.*表格仍可查阅/);
+  const retry = offline.charts.render(chartFixture());
+  assert.equal(offline.scripts.length, 2);
+  offline.win.echarts = offline.engine; offline.scripts[1].onload(); await retry;
+  assert.equal(offline.instances.length, 5);
+});
+
+test('one fundamental chart render failure preserves other charts and disposes its broken instance', async () => {
+  const e = fundamentalChartEnvironment(true), init = e.engine.init;
+  e.engine.init = node => {
+    const instance = init(node);
+    if (node.id === 'chart2') instance.setOption = () => { throw new Error('renderer failure'); };
+    return instance;
+  };
+  await e.charts.render(chartFixture());
+  assert.equal(e.instances.length, 5);
+  assert.equal(e.instances.filter(instance => instance.disposed).length, 1);
+  assert.equal(e.instances.find(instance => instance.node.id === 'chart2').disposed, true);
+  assert.match(e.el('chart2').textContent, /这张图表暂时无法显示.*表格仍可查阅/);
+  assert.ok(e.instances.filter(instance => instance.node.id !== 'chart2').every(instance => instance.option));
+  e.charts.dispose(); assert.ok(e.instances.every(instance => instance.disposed));
+});
+
+test('fundamental report retains all nine chapters, five chart slots, paired profit and verification state', async () => {
+  const e = fundamentalEnvironment(), data = fundamentalFixture();
+  data.report.kpis = [{ label: '归母净利润', value: -1000000, unit: '元', field: 'net_profit' },
+    { label: '扣非归母净利润', value: -1200000, unit: '元', field: 'net_profit_excl' }];
+  e.F.open({ code: '600000' }); e.pending.shift().resolve(data); await tick();
+  const body = e.el('fmBody').innerHTML;
+  for (let i = 1; i <= 9; i++) assert.match(body, new RegExp(`id="fmChapter${i}"`));
+  for (let i = 1; i <= 5; i++) assert.match(body, new RegExp(`id="chart${i}"`));
+  assert.match(body, /原文核验：待核验/);
+  assert.match(body, /扣非归母净利润/);
+  assert.match(body, /fm-negative">-120\.00 万/);
+  assert.match(body, /年度.*季度累计数据分开/);
 });

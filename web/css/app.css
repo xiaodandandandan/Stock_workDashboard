@@ -109,7 +109,27 @@ footer code{background:#eef1f5;border-radius:3px;padding:0 4px}
 .fm-impact{display:inline-block;padding:1px 7px;margin-right:6px;border-radius:4px;font-size:11.5px;background:#eef1f5;color:var(--tx2)}.fm-impact.positive{color:var(--up);background:var(--upbg)}.fm-impact.negative{color:var(--dn);background:var(--dnbg)}
 .fm-news{padding:11px 0;border-top:1px solid var(--line);line-height:1.75;font-size:13px}.fm-news:first-of-type{border-top:0}.fm-news-meta{font-size:11.5px;color:var(--tx3)}.fm-news .fm-rule{margin-top:5px}
 .fm-links{display:flex;gap:12px;flex-wrap:wrap;font-size:12px}.fm-loading{padding:18px;color:var(--tx2);font-size:13px}.fm-section.loading{background:#f8fafc;min-height:90px}
+.fm-body{background:#f7f9fc;line-height:1.7}
+.fm-head h2{font-size:20px}.fm-head .hint{font-size:12px;max-width:780px}
+.fm-tagline{position:relative;padding:16px 18px;margin-bottom:14px;border:1px solid var(--line);border-left:3px solid #3b6fd4;border-radius:8px;background:#fff;font-size:15px}
+.fm-tagline b{display:block;font-weight:600;margin-bottom:5px}.fm-tagline>div{font-size:12px;color:var(--tx2)}
+.fm-verification{display:inline-block;margin-top:7px;padding:2px 9px;border-radius:20px;background:#fff4d6;color:#8a6100;font-size:11.5px}
+.fm-nav{display:flex;gap:6px;flex-wrap:wrap;position:sticky;top:-16px;z-index:4;background:#f7f9fc;padding:8px 0;margin-bottom:10px;border-bottom:1px solid var(--line)}
+.fm-nav button{border:1px solid var(--line);border-radius:5px;padding:4px 9px;background:#fff;color:var(--acc);font-size:12px;cursor:pointer}.fm-nav button:hover{border-color:var(--acc)}
+.fm-chapter{background:#fff;padding:22px 24px;scroll-margin-top:106px}.fm-chapter h3{font-size:17px;margin-bottom:10px}.fm-chapter h3>span{color:#8fa3bf;font-weight:400;margin-right:9px}
+.fm-section h4{margin:18px 0 10px;font-size:14px;font-weight:600}
+.fm-note{background:#f7f9fc;border-radius:6px;padding:10px 12px;color:var(--tx2);font-size:12px;margin:10px 0}
+.fm-company,.fm-recent{margin:10px 0;font-size:13px}.fm-company>summary,.fm-recent>summary{cursor:pointer;color:var(--acc)}
+.fm-company .fm-profile{margin:10px 0}.fm-report-table{margin:12px 0;max-width:100%}
+.fm-report-table table{min-width:650px}.fm-report-table th{position:static}.fm-report-table th,.fm-report-table td{white-space:normal;border:1px solid var(--line);padding:8px 10px;vertical-align:top;line-height:1.7}
+.fm-report-table th{background:#f7f9fc}.fm-report-table td:nth-child(1){white-space:nowrap}.fm-report-table td{font-size:12px;text-align:left}
+.fm-kpis{grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.fm-kpis .fm-metric{padding:12px 14px;border:1px solid var(--line);border-radius:8px}.fm-kpis .v{font-size:21px;font-weight:600;line-height:1.4;margin:5px 0}
+.fm-positive{color:#d9363e}.fm-negative{color:#1a9c6b}
+.fm-chart{width:100%;height:380px;margin:12px 0 4px}.fm-chart-empty{display:flex;align-items:center;justify-content:center;background:#f7f9fc;border:1px dashed var(--line);border-radius:8px;color:var(--tx3);font-size:13px;padding:20px;text-align:center}
+.fm-caption{font-size:12px;color:var(--tx2);text-align:center;margin:6px 0 14px}.fm-observations{padding-left:20px;font-size:13px}.fm-observations li{margin:7px 0}
+.fm-disclosure{background:#fff;font-size:12px;color:var(--tx2)}.fm-disclosure p{margin-top:10px}.fm-news .fm-rule strong{display:none}
 @media(max-width:760px){.fm-modal{padding:0}.fm-box{width:100vw;max-height:100vh;height:100vh;border-radius:0}.fm-head,.fm-body{padding:12px}.fm-section{padding:12px}.fm-head h2{font-size:16px}.fm-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.fm-foot{padding:8px 12px}}
+@media(max-width:760px){.fm-nav{top:-12px}.fm-chapter{scroll-margin-top:156px}.fm-tagline{padding:12px;font-size:14px}.fm-kpis .v{font-size:18px}.fm-kpis .fm-metric{padding:10px}.fm-chart{height:380px}.fm-head{gap:8px}.fm-actions{gap:5px}.fm-actions .btn{padding:4px 8px}.fm-foot{font-size:11px}.fm-chapter h3{font-size:16px}}
 
 /* ---------------- 个股抽屉 ----------------
    ★ 有意**不做全屏遮罩**：抽屉存在的意义就是「同一界面里看一眼再点下一只」，

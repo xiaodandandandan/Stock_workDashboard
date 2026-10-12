@@ -11,15 +11,20 @@ from datetime import date, datetime
 from urllib.parse import urlparse
 
 from . import CACHE, datasource, fundamental_sources, store
+from .fundamental_report import build_report
 from .validation import InputError, to_symbol
 
 LOG = logging.getLogger(__name__)
 FUNDAMENTAL_DIR = os.path.join(CACHE, "fundamentals")
 CACHE_TTL = 15 * 60
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _LOCKS = {}
 _LOCKS_GUARD = threading.Lock()
 _SECTIONS = ("profile", "financials", "valuation", "news")
+_REPORT_NUMBERS = ("revenue", "net_profit", "net_profit_excl", "revenue_yoy", "net_profit_yoy", "operating_cashflow",
+                   "roe", "gross_margin", "debt_ratio", "eps", "total_assets", "total_liabilities", "parent_equity",
+                   "goodwill", "inventory", "accounts_receivable", "financing_cashflow", "cash", "undistributed_profit",
+                   "operating_profit", "operating_cost")
 TITLE_NOTICE = "仅按标题规则初筛，未阅读全文，需核验；可能影响业务或业绩，不代表股价即涨即跌。"
 _TITLE_NEGATION = re.compile(
     r"(?:未|尚未|未曾|没有)(?:实际|实施|发生|涉及|出现|进行|被|受|遭)?"
@@ -98,6 +103,7 @@ def financial_signals(reports, profile=None):
     period = current["report_date"]
     signals = []
     profit = _number(current.get("net_profit"))
+    deduct = _number(current.get("net_profit_excl"))
     previous = next((report for report in reports[1:]
                      if report["report_date"][5:] == period[5:]
                      and int(report["report_date"][:4]) == int(period[:4]) - 1), None)
@@ -106,7 +112,7 @@ def financial_signals(reports, profile=None):
         signals.append(_signal("归母净利润", "偏负面" if profit < 0 else "中性",
                                "本报告期处于亏损状态。" if profit < 0 else
                                ("本报告期归母净利润为零。" if profit == 0 else "本报告期归母净利润为正；盈利不等同于股价上涨。"),
-                               "%s：归母净利润 %s" % (period, _money(profit))))
+                               "%s：归母净利润 %s；扣非归母净利润 %s" % (period, _money(profit), _money(deduct))))
     profit_yoy = _number(current.get("net_profit_yoy"))
     if profit is not None and old_profit is not None and (profit < 0 or old_profit <= 0):
         if old_profit < 0 < profit:
@@ -125,15 +131,19 @@ def financial_signals(reports, profile=None):
         else:
             title, direction, reason = "净利润同比比较", "需核验", "上年同期利润为零，百分比增速不能代表可比增长。"
         signals.append(_signal(title, direction, reason,
-                               "%s %s；%s %s" % (previous["report_date"], _money(old_profit), period, _money(profit))))
+                               "%s：归母 %s，扣非 %s；%s：归母 %s，扣非 %s" % (
+                                   previous["report_date"], _money(old_profit), _money(previous.get("net_profit_excl")),
+                                   period, _money(profit), _money(deduct))))
     elif profit_yoy is not None:
-        if profit is not None and profit < 0:
+        if profit is None:
+            direction, reason = "需核验", "归母利润金额未取得，仅有同比不能确认盈利状态；还需并列扣非口径。"
+        elif profit < 0:
             direction, reason = "需核验", "本期仍亏损，负基数同比需结合上年同期利润核验，不能仅因同比为正视作增长。"
         else:
             direction = "偏积极" if profit_yoy > 0 else ("偏负面" if profit_yoy < 0 else "中性")
             reason = "归母净利润的同比变动；需结合一次性损益与上年基数核验。"
         signals.append(_signal("归母净利润同比", direction, reason,
-                               "%s：披露同比 %.2f%%" % (period, profit_yoy)))
+                               "%s：披露同比 %.2f%%；归母 %s，扣非 %s" % (period, profit_yoy, _money(profit), _money(deduct))))
     revenue_yoy = _number(current.get("revenue_yoy"))
     if revenue_yoy is not None:
         signals.append(_signal("营业收入同比", "偏积极" if revenue_yoy > 0 else ("偏负面" if revenue_yoy < 0 else "中性"),
@@ -180,10 +190,8 @@ def title_impact(title):
             "kind": "推断", "method": "标题规则初筛", "notice": TITLE_NOTICE}
 
 
-def _normalize_financials(section, profile):
-    data = section["data"]
+def _normalized_reports(received, limit, annual=False):
     reports, rejected = [], 0
-    received = data.get("reports", [])
     if not isinstance(received, list):
         received, rejected = [], 1
     for report in received:
@@ -193,11 +201,14 @@ def _normalize_financials(section, profile):
         period = _as_date(report.get("report_date"))
         announced_raw = report.get("announced_date")
         announced = _as_date(announced_raw) if announced_raw else None
-        if period is None or period > _today() or (announced_raw and (announced is None or announced > _today())):
+        if period is None or period > _today() or (announced_raw and (announced is None or announced > _today() or announced < period)):
+            rejected += 1
+            continue
+        if annual and (period.month != 12 or period.day != 31 or period.year >= _today().year):
             rejected += 1
             continue
         normalized = dict(report, report_date=period.isoformat())
-        for field in ("revenue", "net_profit", "revenue_yoy", "net_profit_yoy", "operating_cashflow", "roe", "gross_margin", "debt_ratio", "eps", "total_assets", "total_liabilities"):
+        for field in _REPORT_NUMBERS:
             normalized[field] = _number(report.get(field))
         reports.append(normalized)
     reports.sort(key=lambda report: report["report_date"], reverse=True)
@@ -206,11 +217,69 @@ def _normalize_financials(section, profile):
         if report["report_date"] not in seen:
             unique.append(report)
             seen.add(report["report_date"])
-    data["reports"] = unique[:8]
+    return unique[:limit], rejected
+
+
+def _business_period(received):
+    if not isinstance(received, dict):
+        return None
+    period = _as_date(received.get("report_date"))
+    if period is None or period > _today():
+        return None
+    items = []
+    for item in received.get("items", []) if isinstance(received.get("items"), list) else []:
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str) or not item["name"].strip():
+            continue
+        normalized = dict(item)
+        for field in ("revenue", "gross_margin", "share_pct"):
+            normalized[field] = _number(item.get(field))
+        if normalized["share_pct"] is not None and not 0 <= normalized["share_pct"] <= 100:
+            normalized["share_pct"] = None
+        items.append(normalized)
+    return dict(received, report_date=period.isoformat(), items=items)
+
+
+def _normalize_business(received):
+    raw = received if isinstance(received, dict) else {}
+    normalized = _business_period(raw)
+    periods = []
+    for row in raw.get("periods", []) if isinstance(raw.get("periods"), list) else []:
+        period = _business_period(row)
+        if period is not None:
+            periods.append(period)
+    if normalized is not None and not any(row["report_date"] == normalized["report_date"] for row in periods):
+        periods.append(normalized)
+    periods.sort(key=lambda row: row["report_date"], reverse=True)
+    latest = periods[0] if periods else normalized
+    classification = (latest or raw).get("classification", "")
+    compatible = [row for row in periods if row.get("classification", "") == classification]
+    seen, unique = set(), []
+    for row in compatible:
+        if row["report_date"] not in seen:
+            seen.add(row["report_date"])
+            unique.append(row)
+    result = dict(raw, report_date=(latest or {}).get("report_date"), items=(latest or {}).get("items", []),
+                  classification=classification, periods=unique[:4],
+                  source=str(raw.get("source") or ""), url=_safe_url(raw.get("url")), error=str(raw.get("error") or ""),
+                  incomparable_periods=len(periods) - len(compatible))
+    if raw.get("status") not in ("ok", "partial", "empty", "failed"):
+        result["status"] = "ok" if result["items"] else "empty"
+    elif not result["items"] and raw.get("status") in ("ok", "partial"):
+        result["status"] = "empty"
+    result["notice"] = "仅比较同一业务分类；未取得的构成不以行业标签或零值代替。"
+    return result
+
+
+def _normalize_financials(section, profile):
+    data = section["data"]
+    data["reports"], rejected = _normalized_reports(data.get("reports", []), 8)
+    data["annual_reports"], rejected_annual = _normalized_reports(data.get("annual_reports", []), 10, annual=True)
+    data["business_segments"] = _normalize_business(data.get("business_segments"))
     data["signals"] = financial_signals(data["reports"], profile)
     data["rejected_reports"] = rejected
+    data["rejected_annual_reports"] = rejected_annual
     data["notice"] = "财务数据按披露报告期读取；不同季度累计口径不可直接环比，未作统一行业评分或股价预测。"
-    if not data["reports"] and section["status"] != "failed":
+    if not data["reports"] and not data["annual_reports"] and section["status"] != "failed":
         section["status"] = "empty"
 
 
@@ -294,6 +363,26 @@ def _lock_for(symbol):
         return _LOCKS.setdefault(symbol, threading.Lock())
 
 
+def _valid_cached_report(report):
+    if not isinstance(report, dict):
+        return False
+    verification = report.get("verification")
+    if not isinstance(verification, dict) or verification.get("status") != "pending":
+        return False
+    links = verification.get("links")
+    if not isinstance(links, list) or any(not isinstance(link, dict) or not isinstance(link.get("label"), str)
+                                          or not _safe_url(link.get("url")) for link in links):
+        return False
+    for field in ("kpis", "conclusions", "risk_exposure", "cash_quality", "scenarios", "checklist", "regulatory_checks"):
+        entries = report.get(field)
+        if not isinstance(entries, list) or any(not isinstance(entry, dict) for entry in entries):
+            return False
+    return (isinstance(report.get("valuation_notes"), list)
+            and all(isinstance(note, str) for note in report["valuation_notes"])
+            and isinstance(report.get("annual_coverage"), dict)
+            and isinstance(report.get("business_segments"), dict))
+
+
 def _cached(path, symbol, now):
     if os.path.islink(path):
         return None
@@ -316,8 +405,12 @@ def _cached(path, symbol, now):
     if not any(section["status"] == "ok" for section in sections.values()):
         return None
     if (not isinstance(sections["financials"]["data"].get("reports"), list)
+            or not isinstance(sections["financials"]["data"].get("annual_reports"), list)
+            or not isinstance(sections["financials"]["data"].get("business_segments"), dict)
             or not isinstance(sections["financials"]["data"].get("signals"), list)
             or not isinstance(sections["news"]["data"].get("items"), list)):
+        return None
+    if not _valid_cached_report(payload.get("report")):
         return None
     cached = copy.deepcopy(payload)
     cached["cache"] = {"hit": True, "persisted": True, "ttl_seconds": CACHE_TTL,
@@ -368,6 +461,7 @@ def fundamental_payload(symbol, refresh=False):
                    "notice": "基本面读数和标题规则仅供核验，不构成统一评分、投资建议或股价预测。",
                    "cache": {"hit": False, "persisted": False, "ttl_seconds": CACHE_TTL,
                              "saved_at": _moment(fetched_at), "expires_at": _moment(fetched_at + CACHE_TTL), "error": ""}}
+        payload["report"] = build_report(symbol, ordered, payload["generated"])
         if ok:
             try:
                 payload["cache"]["persisted"] = True
