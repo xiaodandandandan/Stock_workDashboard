@@ -572,3 +572,102 @@ test('all shipped classic scripts parse', () => {
     if (name.endsWith('.js')) new vm.Script(read(dir + '/' + name), { filename: name });
   }
 });
+
+function fundamentalFixture(symbol = 'sh600000') {
+  const section = data => ({ status: 'ok', data, error: '', as_of: '2026-10-12 15:00:00',
+    url: 'https://data.eastmoney.com/', source: '东方财富' });
+  return { symbol, name: symbol, generated: '2026-10-12 15:00:00', status: 'ok', cache: { hit: false, ttl_seconds: 900 },
+    summary: ['已披露财报'], sources: [], sections: {
+      profile: section({ name: symbol, description: '公司业务' }),
+      financials: section({ reports: [{ report_date: '2026-06-30', announced_date: '2026-08-28',
+        revenue: 0, net_profit: -1000000, operating_cashflow: null }], signals: [] }),
+      valuation: section({ price: 10, pe_ttm: -5, pb: 1 }),
+      news: section({ items: [], coverage: { announcements: { status: 'empty' }, media_news: { status: 'failed', error: 'news timeout' } } }),
+    } };
+}
+
+function fundamentalEnvironment() {
+  const pending = [], elements = new Map(), events = {};
+  const el = id => {
+    if (!elements.has(id)) {
+      const classes = new Set();
+      elements.set(id, { innerHTML: '', textContent: '', disabled: false, style: {}, events: {},
+        classList: { add: k => classes.add(k), remove: k => classes.delete(k), contains: k => classes.has(k) },
+        setAttribute() {}, focus() {}, querySelectorAll: () => [], addEventListener(name, fn) { this.events[name] = fn; } });
+    }
+    return elements.get(id);
+  };
+  const ctx = vm.createContext({ console, AbortController, URL, window: { Zoom: { isOpen: () => false } },
+    document: { getElementById: el, addEventListener: (name, fn) => { events[name] = fn; }, activeElement: null },
+    esc: value => String(value ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])),
+    API: { fundamentals: (symbol, refresh, signal) => new Promise(resolve => pending.push({ symbol, refresh, signal, resolve })) },
+  });
+  vm.runInContext(read('js/state.js'), ctx);
+  vm.runInContext(read('js/fundamentals.js'), ctx);
+  return { pending, el, events, F: vm.runInContext('Fundamentals', ctx) };
+}
+
+test('fundamentals fetch only on open and late responses cannot overwrite another stock', async () => {
+  const e = fundamentalEnvironment();
+  assert.equal(e.pending.length, 0);
+  e.F.open({ code: '600000', symbol: 'sh600000' });
+  const a = e.pending.shift();
+  e.F.open({ code: '000001', symbol: 'sz000001' });
+  const b = e.pending.shift();
+  assert.equal(a.signal.aborted, true);
+  b.resolve(fundamentalFixture('sz000001')); await tick();
+  a.resolve(fundamentalFixture('sh600000')); await tick();
+  assert.match(e.el('fmTitle').textContent, /sz000001/);
+  assert.doesNotMatch(e.el('fmTitle').textContent, /sh600000/);
+});
+
+test('closing fundamentals invalidates a pending request and refresh bypasses cache', async () => {
+  const e = fundamentalEnvironment();
+  e.F.open({ code: '600000' }); const a = e.pending.shift();
+  e.F.close(); a.resolve(fundamentalFixture()); await tick();
+  assert.equal(a.signal.aborted, true);
+  assert.equal(e.F.isOpen(), false);
+  e.F.open({ code: '600000' }); e.pending.shift().resolve(fundamentalFixture()); await tick();
+  e.el('fmRefresh').events.click();
+  const force = e.pending.shift();
+  assert.equal(force.refresh, true);
+  force.resolve(fundamentalFixture()); await tick();
+});
+
+test('fundamentals preserve zero values, partial financial facts, and empty news coverage', async () => {
+  const e = fundamentalEnvironment(), data = fundamentalFixture();
+  data.status = 'partial'; data.sections.financials.partial = true; data.sections.financials.error = 'cashflow unavailable';
+  data.sections.news.status = 'empty';
+  e.F.open({ code: '600000' }); e.pending.shift().resolve(data); await tick();
+  const body = e.el('fmBody').innerHTML;
+  assert.match(body, /0\.00 元/);
+  assert.match(body, /-100\.00 万/);
+  assert.match(body, /cashflow unavailable/);
+  assert.match(body, /公司公告：近期无符合条件的记录/);
+  assert.match(body, /媒体新闻：暂不可用.*news timeout/);
+  assert.match(body, /未阅读全文/);
+});
+
+test('fundamental content is escaped and unsafe source links are not executable', async () => {
+  const e = fundamentalEnvironment(), data = fundamentalFixture();
+  data.sections.profile.data.description = '<img src=x onerror=alert(1)>';
+  data.sections.news.data.items = [{ title: '<script>bad</script>', date: '2026-10-12',
+    url: 'javascript:alert(1)', kind: '新闻', impact: { direction: '需核验', evidence: '标题', reason: '核验' } }];
+  data.sources = [{ label: 'unsafe', url: 'javascript:alert(1)' }];
+  e.F.open({ code: '600000' }); e.pending.shift().resolve(data); await tick();
+  const body = e.el('fmBody').innerHTML;
+  assert.match(body, /&lt;img/); assert.match(body, /&lt;script/);
+  assert.doesNotMatch(body, /href="javascript:|<script>|<img/);
+});
+
+test('fundamental API enforces requested symbol and valid section contract', async () => {
+  const good = fundamentalFixture('sz000001'); let request;
+  const api = apiEnvironment(async (url, init) => { request = { url, init }; return { ok: true, json: async () => good }; });
+  const abort = new AbortController(); abort.abort();
+  await api.fundamentals('sz000001', true, abort.signal);
+  assert.equal(request.url.searchParams.get('code'), 'sz000001');
+  assert.equal(request.url.searchParams.get('refresh'), '1');
+  assert.equal(request.init.signal.aborted, true);
+  const wrong = apiEnvironment(async () => ({ ok: true, json: async () => fundamentalFixture('sh600000') }));
+  await assert.rejects(wrong.fundamentals('sz000001'), /股票或资料格式/);
+});

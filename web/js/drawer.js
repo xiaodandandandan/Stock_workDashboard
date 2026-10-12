@@ -342,11 +342,13 @@ const Drawer = (() => {
       // ★ 放大视图开着时 Esc 先关它，不要顺手把抽屉也关了 —— 抽屉在下面（监听先绑、
       //   先触发），只能用 Zoom 的状态来判断该由谁响应。
       if (e.key !== 'Escape') return;
+      if (window.Fundamentals?.isOpen()) return;
       if (window.Zoom && Zoom.isOpen && Zoom.isOpen()) return;
       if (el('drawer').classList.contains('on')) close();
     });
 
     el('dwZoom').addEventListener('click', () => Zoom.open());
+    el('dwFund').addEventListener('click', e => { if (cur) Fundamentals.open(cur, e.currentTarget); });
 
     el('dwFreq').addEventListener('click', e => {
       const b = e.target.closest('button[data-freq]');

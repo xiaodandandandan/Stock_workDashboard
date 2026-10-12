@@ -195,6 +195,7 @@ function renderTable(list) {
       <td class="num scan-return-cell" title="${esc('扫描基准：' + D.generated + '，价格 ' + r.close + '；报价截至：' + (q?.date || '尚未获取'))}">${signedPrice(scanReturn(q), true)}</td>
       <td class="tracking-cell">${trackingLabel(r, q)}</td>
       <td class="num">${(+r.amt).toFixed(2)}</td>
+      <td class="fundamental-action"><button class="btn fundamental-btn" data-fundamental="${esc(r.symbol || normalizeSymbol(r.code))}" title="点击后获取该公司的基本面与最新动态">基本面</button></td>
     </tr>`;
   }).join('');
   document.getElementById('empty').style.display = list.length ? 'none' : 'block';
@@ -432,6 +433,12 @@ function bind() {
     });
   });
   document.getElementById('tb').addEventListener('click', e => {
+    const fundamental = e.target.closest('button[data-fundamental]');
+    if (fundamental) {
+      const row = D.rows.find(r => (r.symbol || normalizeSymbol(r.code)) === fundamental.dataset.fundamental);
+      if (row) Fundamentals.open(row, fundamental);
+      return;
+    }
     const tg = e.target.closest('.tag[data-type]');
     if (tg) {                                  // 点类型标签 = 按该类型筛选，不展开抽屉
       const ti = TABS.findIndex(t => t[2] === tg.dataset.type);

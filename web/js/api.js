@@ -88,6 +88,19 @@ const API = {
     if (data.symbol !== symbol || data.freq !== freq) throw new Error('返回的股票或周期与请求不一致');
     return data;
   },
+  /** @param {string} code @param {boolean} [refresh] @param {AbortSignal} [signal]
+   * @returns {Promise<FundamentalPayload>} */
+  async fundamentals(code, refresh = false, signal) {
+    const symbol = normalizeSymbol(code);
+    const body = await this.request('/api/fundamentals', { code: symbol, refresh: refresh ? 1 : 0 }, { signal });
+    if (!isRecord(body) || body.symbol !== symbol || !isRecord(body.sections) ||
+        !Array.isArray(body.summary) || !Array.isArray(body.sources) ||
+        ['profile', 'financials', 'valuation', 'news'].some(key => {
+          const section = /** @type {Record<string, unknown>} */ (body.sections)[key];
+          return !isRecord(section) || !['ok', 'empty', 'failed'].includes(String(section.status)) || !isRecord(section.data);
+        })) throw new Error('基本面接口返回的股票或资料格式不正确');
+    return /** @type {FundamentalPayload} */ (/** @type {unknown} */ (body));
+  },
   /** @param {ScanOptions} [body] @returns {Promise<{started: boolean, reason: string}>} */
   async runScan(body = {}) {
     return /** @type {{started: boolean, reason: string}} */ (await this.request('/api/scan', {}, {

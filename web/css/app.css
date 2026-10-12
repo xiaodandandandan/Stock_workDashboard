@@ -85,10 +85,31 @@ td.scan-return-cell{font-size:14px;font-weight:600}
 .daily-return-cell{width:90px;min-width:90px;white-space:nowrap}
 .tracking-cell{width:98px;max-width:98px;padding-left:5px;padding-right:5px;white-space:nowrap}
 .stock-table th,.stock-table td{text-align:center;vertical-align:middle}
+.fundamental-action{width:76px;white-space:nowrap}
+.fundamental-btn{padding:3px 8px;color:var(--acc)}
 .tablewrap{max-height:640px;overflow:auto;border-radius:8px}
 .empty{padding:40px;text-align:center;color:var(--tx3)}
 footer{margin-top:18px;font-size:12px;color:var(--tx3);line-height:1.7}
 footer code{background:#eef1f5;border-radius:3px;padding:0 4px}
+
+/* 按需基本面分析 */
+.fm-modal{position:fixed;inset:0;display:none;align-items:center;justify-content:center;padding:24px;background:rgba(15,23,42,.42);z-index:110}
+.fm-modal.on{display:flex}
+.fm-box{width:min(1120px,96vw);max-height:94vh;display:flex;flex-direction:column;background:var(--card);border-radius:12px;box-shadow:0 24px 64px rgba(15,23,42,.3);overflow:hidden}
+.fm-head{display:flex;justify-content:space-between;gap:16px;padding:16px 20px;border-bottom:1px solid var(--line);flex-shrink:0}
+.fm-head h2{font-size:18px;font-weight:600}.fm-actions{display:flex;align-items:flex-start;gap:8px;white-space:nowrap}
+.fm-body{padding:16px 20px;overflow:auto;min-height:220px}.fm-foot{padding:10px 20px;border-top:1px solid var(--line);color:var(--tx3);font-size:12px;flex-shrink:0}
+.fm-section{border:1px solid var(--line);border-radius:9px;padding:14px 16px;margin-bottom:14px}.fm-section h3{font-size:15px;margin-bottom:5px}
+.fm-source{font-size:11.5px;color:var(--tx3);margin-bottom:10px}.fm-source a,.fm-news a,.fm-links a{color:var(--acc);text-decoration:none}.fm-source a:hover,.fm-news a:hover,.fm-links a:hover{text-decoration:underline}
+.fm-warning{padding:8px 11px;border-radius:6px;background:#fff4d6;color:#8a6100;font-size:12px;margin-bottom:10px}.fm-error{color:#b45309;font-size:12px;line-height:1.7}
+.fm-summary{line-height:1.8;padding-left:20px;font-size:13px}.fm-profile{font-size:13px;line-height:1.8;white-space:pre-wrap}.fm-profile details{margin-top:7px}.fm-profile summary{cursor:pointer;color:var(--acc)}
+.fm-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:9px;margin:10px 0}.fm-metric{background:#f8fafc;border-radius:6px;padding:9px 11px}.fm-metric .k{font-size:11.5px;color:var(--tx3)}.fm-metric .v{font-size:16px;margin-top:3px;font-variant-numeric:tabular-nums}
+.fm-report-table{overflow:auto}.fm-report-table th,.fm-report-table td{font-size:12px;white-space:nowrap;text-align:right}.fm-report-table th:first-child,.fm-report-table td:first-child{text-align:left}
+.fm-rule{padding:10px 12px;border-left:3px solid #b8c5d6;background:#f8fafc;margin-top:9px;border-radius:4px;font-size:12.5px;line-height:1.7}.fm-rule strong{font-weight:600}.fm-evidence{color:var(--tx2)}
+.fm-impact{display:inline-block;padding:1px 7px;margin-right:6px;border-radius:4px;font-size:11.5px;background:#eef1f5;color:var(--tx2)}.fm-impact.positive{color:var(--up);background:var(--upbg)}.fm-impact.negative{color:var(--dn);background:var(--dnbg)}
+.fm-news{padding:11px 0;border-top:1px solid var(--line);line-height:1.75;font-size:13px}.fm-news:first-of-type{border-top:0}.fm-news-meta{font-size:11.5px;color:var(--tx3)}.fm-news .fm-rule{margin-top:5px}
+.fm-links{display:flex;gap:12px;flex-wrap:wrap;font-size:12px}.fm-loading{padding:18px;color:var(--tx2);font-size:13px}.fm-section.loading{background:#f8fafc;min-height:90px}
+@media(max-width:760px){.fm-modal{padding:0}.fm-box{width:100vw;max-height:100vh;height:100vh;border-radius:0}.fm-head,.fm-body{padding:12px}.fm-section{padding:12px}.fm-head h2{font-size:16px}.fm-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.fm-foot{padding:8px 12px}}
 
 /* ---------------- 个股抽屉 ----------------
    ★ 有意**不做全屏遮罩**：抽屉存在的意义就是「同一界面里看一眼再点下一只」，

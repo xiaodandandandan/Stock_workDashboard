@@ -396,5 +396,19 @@ class HttpValidationTests(unittest.TestCase):
                     self.assertEqual(self.request('GET', '/api/tracking?' + query)[0], 400)
             track.assert_not_called()
 
+    def test_fundamental_route_is_on_demand_and_passes_refresh(self):
+        with patch.object(server.FA, 'fundamental_payload', return_value={'symbol': 'sh600000', 'sections': {}}) as analyze:
+            code, body = self.request('GET', '/api/fundamentals?code=sh600000&refresh=1')
+            self.assertEqual(code, 200)
+            self.assertEqual(json.loads(body)['symbol'], 'sh600000')
+            analyze.assert_called_once_with('sh600000', refresh=True)
+
+    def test_fundamental_invalid_queries_do_not_reach_sources(self):
+        with patch.object(server.FA.fundamental_sources, 'fetch_profile') as fetch:
+            for query in ('', 'code=../x', 'code=sh000001', 'code=hk00700', 'code=600000&refresh=2'):
+                with self.subTest(query=query):
+                    self.assertEqual(self.request('GET', '/api/fundamentals?' + query)[0], 400)
+            fetch.assert_not_called()
+
 
 if __name__ == '__main__': unittest.main()

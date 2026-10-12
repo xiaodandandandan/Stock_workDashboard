@@ -54,3 +54,13 @@ interface ScanStatus {
   running: boolean; stage: string; done: number; total: number; msg: string; error: string;
   result: { hit: number; elapsed: number; errors: number; complete: boolean; industry_status?: IndustryStatus } | null;
 }
+interface FundamentalSection {
+  status: 'ok' | 'empty' | 'failed'; data: Record<string, unknown>;
+  error: string; as_of: string; url: string; source: string; partial?: boolean; errors?: string[];
+}
+interface FundamentalPayload {
+  symbol: SymbolId; name: string; generated: string; status: 'ok' | 'partial' | 'empty' | 'failed';
+  cache: { hit: boolean; ttl_seconds: number; saved_at: string; expires_at: string };
+  sections: Record<'profile' | 'financials' | 'valuation' | 'news', FundamentalSection>;
+  summary: string[]; sources: { label: string; url: string }[];
+}

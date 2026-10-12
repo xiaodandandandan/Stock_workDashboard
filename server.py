@@ -16,6 +16,7 @@
     POST /api/scan                 触发一次全市场扫描（后台跑，立即返回）
     GET  /api/scan/status          扫描进度
     GET  /api/stock?code=&freq=    单票：日 K 走缓存秒回，分钟线现取现算
+    GET  /api/fundamentals?code=&refresh=  单票基本面与公司动态，按需获取并缓存
 
 零第三方依赖，只用标准库。
 """
@@ -38,6 +39,7 @@ from core import datasource as DS                        # noqa: E402
 from core import engine as E                             # noqa: E402
 from core import store as ST                             # noqa: E402
 from core import tracking as TR                          # noqa: E402
+from core import fundamentals as FA                      # noqa: E402
 from core import engine_identity                         # noqa: E402
 from core.validation import InputError, integer          # noqa: E402
 
@@ -334,6 +336,15 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(stock_payload(
                 code, freq, lookback=integer(one("lookback", "250"), "lookback", 30, 5000),
                 with_report=one("report") == "1"))
+
+        if p == "/api/fundamentals":
+            code = one("code").strip()
+            if not code:
+                raise InputError("缺少 code")
+            refresh = one("refresh", "0")
+            if refresh not in ("0", "1"):
+                raise InputError("refresh 必须是 0 或 1")
+            return self.send_json(FA.fundamental_payload(code, refresh=refresh == "1"))
 
         if p == "/api/industry":
             mp = industry_lookup()
