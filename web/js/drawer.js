@@ -113,14 +113,21 @@ const Drawer = (() => {
   }
 
   /* ---------------- 渲染 ---------------- */
+  function trackingNumber(value, percent = false) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return '—';
+    const color = value > 0 ? 'price-up' : value < 0 ? 'price-down' : '';
+    return `<span class="${color}">${value > 0 ? '+' : ''}${value.toFixed(2)}${percent ? '%' : ''}</span>`;
+  }
   function trackingMetaHTML() {
     const q = cur?.tracking;
-    const change = q?.change_pct;
-    const color = change > 0 ? 'price-up' : change < 0 ? 'price-down' : '';
+    const cumulative = q?.scan_change_pct ?? q?.change_pct;
     return cur?.scan_at ?
       `<span>跟踪扫描 ${esc(cur.scan_at)} · 扫描价 <b>${cur.close != null ? (+cur.close).toFixed(2) : '—'}</b>` +
       ` · 最新报价 <b>${q?.price != null ? (+q.price).toFixed(2) : '—'}</b>` +
-      ` · 扫描后至今涨跌幅 <span class="${color}">${change != null ? (change > 0 ? '+' : '') + change.toFixed(2) + '%' : '—'}</span>` +
+      ` · 昨收价 <b>${q?.previous_close != null ? (+q.previous_close).toFixed(2) : '—'}</b>` +
+      ` · 当天涨跌值 ${trackingNumber(q?.daily_change)}` +
+      ` · 当天涨跌幅 ${trackingNumber(q?.daily_change_pct, true)}` +
+      ` · 扫描后至今涨跌幅 ${trackingNumber(cumulative, true)}` +
       `${q?.buy_stop_breached ? ' · 触及原买点失效位' : ''} · 报价时间 ${esc(q?.date || '未获取')}</span>` : '';
   }
   function renderMeta(d) {

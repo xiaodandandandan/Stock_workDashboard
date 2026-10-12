@@ -7,12 +7,14 @@ from core import datasource as ds, tracking
 from core.validation import InputError
 
 
-def quote_line(symbol, price="12.5", date="20261012150000", exchange=None, code=None):
+def quote_line(symbol, price="12.5", date="20261012150000", exchange=None, code=None,
+               previous_close="10"):
     fields = [""] * 31
     fields[0] = exchange or {"sh": "1", "sz": "51", "bj": "62"}[symbol[:2]]
     fields[1] = "名称"
     fields[2] = code or symbol[2:]
     fields[3] = str(price)
+    fields[4] = str(previous_close) if previous_close is not None else ""
     fields[30] = date
     return 'v_%s="%s";' % (symbol, "~".join(fields))
 
@@ -21,8 +23,9 @@ def row(symbol="sh600000", close=10, buy=None):
     return {"symbol": symbol, "code": symbol[2:], "close": close, "buy": buy or []}
 
 
-def reply(prices, date="2026-10-12 15:00:00"):
-    return {"quotes": {symbol: {"price": price, "date": date} for symbol, price in prices.items()},
+def reply(prices, date="2026-10-12 15:00:00", previous_close=10):
+    return {"quotes": {symbol: {"price": price, "date": date, "previous_close": previous_close}
+                       for symbol, price in prices.items()},
             "errors": {}}
 
 
@@ -35,7 +38,7 @@ class QuotePriceTests(unittest.TestCase):
         self.assertEqual(set(response["quotes"]), set(symbols))
         self.assertEqual(response["errors"], {})
         self.assertEqual(response["quotes"]["sh688001"],
-                         {"price": 12.5, "date": "2026-10-12 15:00:00"})
+                         {"price": 12.5, "date": "2026-10-12 15:00:00", "previous_close": 10})
         self.assertEqual(get.call_args.args[0], "https://qt.gtimg.cn/q=" + ",".join(symbols))
 
     def test_same_code_keeps_exchange_and_rejects_mismatches(self):
@@ -66,6 +69,19 @@ class QuotePriceTests(unittest.TestCase):
                 response = ds.quote_prices(["sh600000"])
             self.assertFalse(response["quotes"])
             self.assertIn("sh600000", response["errors"])
+
+    def test_previous_close_is_provider_field_and_invalid_value_retains_quote(self):
+        with patch.object(ds, "_get", return_value=quote_line("sh600000", price="10",
+                                                              previous_close="11")):
+            quote = ds.quote_prices(["sh600000"])["quotes"]["sh600000"]
+        self.assertEqual(quote["previous_close"], 11)
+        for previous in (None, "", "bad", "0", "-1", "nan", "inf", "1e999"):
+            with self.subTest(previous=previous), patch.object(ds, "_get", return_value=
+                    quote_line("sh600000", previous_close=previous)):
+                response = ds.quote_prices(["sh600000"])
+            self.assertEqual(response["quotes"]["sh600000"]["price"], 12.5)
+            self.assertIsNone(response["quotes"]["sh600000"]["previous_close"])
+            self.assertEqual(response["errors"], {})
 
     def test_batch_failure_preserves_other_batch(self):
         symbols = ["sh%06d" % (600000 + i) for i in range(101)]
@@ -162,6 +178,12 @@ class TrackingTests(unittest.TestCase):
         self.assertEqual(get.call_count, 1)
         self.assertEqual(first["quotes"]["sh600000"]["change_pct"], 20)
         self.assertEqual(second["quotes"]["sh600000"]["change_pct"], 50)
+        self.assertEqual(first["quotes"]["sh600000"]["daily_change"], 2)
+        self.assertEqual(first["quotes"]["sh600000"]["daily_change_pct"], 20)
+        self.assertEqual(second["quotes"]["sh600000"]["daily_change"], 2)
+        self.assertEqual(second["quotes"]["sh600000"]["daily_change_pct"], 20)
+        self.assertEqual(first["quotes"]["sh600000"]["scan_change_pct"], 20)
+        self.assertEqual(second["quotes"]["sh600000"]["scan_change_pct"], 50)
         self.assertFalse(first["quotes"]["sh600000"]["buy_stop_breached"])
         self.assertTrue(second["quotes"]["sh600000"]["buy_stop_breached"])
 
@@ -182,6 +204,21 @@ class TrackingTests(unittest.TestCase):
             get.assert_called_once()
             self.assertEqual(response["quotes"]["sh600000"]["price"], 14)
 
+    def test_new_calendar_day_invalidates_raw_quote_before_ttl(self):
+        with patch.object(tracking.time, "monotonic", return_value=100), \
+             patch.object(tracking, "_cache_day", return_value="2026-10-12"), \
+             patch.object(ds, "quote_prices", return_value=reply({"sh600000": 10}, previous_close=11)):
+            first = tracking.track_rows([row(close=8)])
+        with patch.object(tracking.time, "monotonic", return_value=101), \
+             patch.object(tracking, "_cache_day", return_value="2026-10-13"), \
+             patch.object(ds, "quote_prices", return_value=reply({"sh600000": 12},
+                         date="2026-10-13 09:30:00", previous_close=10)) as get:
+            next_day = tracking.track_rows([row(close=8)])
+        get.assert_called_once_with(["sh600000"])
+        self.assertEqual(first["quotes"]["sh600000"]["daily_change_pct"], -9.09)
+        self.assertEqual(next_day["quotes"]["sh600000"]["daily_change_pct"], 20)
+        self.assertEqual(next_day["quotes"]["sh600000"]["previous_close"], 10)
+
     def test_failure_is_unknown_not_zero_and_is_not_cached(self):
         with patch.object(ds, "quote_prices", side_effect=[
                 {"quotes": {}, "errors": {"sh600000": "offline"}}, reply({"sh600000": 11})]) as get:
@@ -189,8 +226,11 @@ class TrackingTests(unittest.TestCase):
             good = tracking.track_rows([row()])
         quote = failed["quotes"]["sh600000"]
         self.assertEqual(quote["status"], "unavailable")
-        for field in ("price", "date", "change", "change_pct", "buy_stop_breached"):
+        for field in ("price", "date", "previous_close", "daily_change", "daily_change_pct",
+                      "scan_change", "scan_change_pct", "change", "change_pct", "buy_stop_breached"):
             self.assertIsNone(quote[field])
+        self.assertEqual(quote["daily_status"], "unavailable")
+        self.assertEqual(quote["scan_status"], "unavailable")
         self.assertEqual(failed["errors"]["sh600000"], "offline")
         self.assertEqual(good["quotes"]["sh600000"]["change_pct"], 10)
         self.assertEqual(get.call_count, 2)
@@ -215,6 +255,8 @@ class TrackingTests(unittest.TestCase):
                     "quotes": {"sh600000": quote}, "errors": {}}):
                 response = tracking.track_rows([row()])
                 self.assertEqual(response["quotes"]["sh600000"]["status"], "unavailable")
+                for field in ("daily_change", "daily_change_pct", "scan_change", "scan_change_pct"):
+                    self.assertIsNone(response["quotes"]["sh600000"][field])
                 self.assertNotIn("sh600000", tracking._QUOTES)
 
     def test_invalid_baseline_retains_price_but_does_not_invent_return(self):
@@ -226,6 +268,45 @@ class TrackingTests(unittest.TestCase):
             self.assertEqual(quote["price"], 12)
             self.assertIsNone(quote["change"])
             self.assertIsNone(quote["change_pct"])
+            self.assertEqual(quote["daily_status"], "ok")
+            self.assertEqual(quote["daily_change"], 2)
+            self.assertEqual(quote["daily_change_pct"], 20)
+            self.assertIsNone(quote["scan_change"])
+            self.assertIsNone(quote["scan_change_pct"])
+
+    def test_daily_and_scan_moves_can_have_opposite_directions(self):
+        rows = [row(close=8)]
+        original = copy.deepcopy(rows)
+        with patch.object(ds, "quote_prices", return_value=reply({"sh600000": 10}, previous_close=11)):
+            quote = tracking.track_rows(rows)["quotes"]["sh600000"]
+        self.assertEqual(quote["previous_close"], 11)
+        self.assertEqual((quote["daily_change"], quote["daily_change_pct"]), (-1, -9.09))
+        self.assertEqual((quote["scan_change"], quote["scan_change_pct"]), (2, 25))
+        self.assertEqual((quote["change"], quote["change_pct"]), (2, 25))
+        self.assertEqual((quote["status"], quote["daily_status"], quote["scan_status"]), ("ok", "ok", "ok"))
+        self.assertEqual(rows, original)
+
+    def test_missing_previous_close_never_uses_snapshot_or_invents_daily_zero(self):
+        for previous in (None, 0, -1, "bad", float("nan"), float("inf"), True, 5e-324):
+            with self.subTest(previous=previous), patch.object(ds, "quote_prices",
+                    return_value=reply({"sh600000": 10}, previous_close=previous)):
+                response = tracking.track_rows([row(close=8)], refresh=True)
+            quote = response["quotes"]["sh600000"]
+            self.assertEqual(quote["price"], 10)
+            self.assertEqual(quote["status"], "ok")
+            self.assertEqual(quote["daily_status"], "invalid_previous_close")
+            self.assertIsNone(quote["daily_change"])
+            self.assertIsNone(quote["daily_change_pct"])
+            self.assertEqual(quote["scan_change_pct"], 25)
+            self.assertEqual(quote["change_pct"], 25)
+            self.assertIn("昨收", response["errors"]["sh600000"])
+
+    def test_independent_zero_and_negative_scan_move_with_valid_daily(self):
+        with patch.object(ds, "quote_prices", return_value=reply({"sh600000": 10}, previous_close=10)):
+            quote = tracking.track_rows([row(close=12)])["quotes"]["sh600000"]
+        self.assertEqual((quote["daily_change"], quote["daily_change_pct"]), (0, 0))
+        self.assertEqual((quote["scan_change"], quote["scan_change_pct"]), (-2, -16.67))
+        self.assertEqual((quote["daily_status"], quote["scan_status"]), ("ok", "ok"))
 
     def test_stop_equality_breaches_only_originally_valid_finite_buy_stops(self):
         buy = [{"type": "一类买点", "stop": 10, "valid": 1},

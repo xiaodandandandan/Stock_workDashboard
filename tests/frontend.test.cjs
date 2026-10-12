@@ -527,6 +527,46 @@ test('price changes show direction, missing values and current stop breach separ
   assert.match(e.run("trackingLabel({buy:[]}, {status:'unavailable'})"), /行情未获取/);
 });
 
+test('daily changes and cumulative returns render and sort with independent directions', async () => {
+  const e = appEnvironment(), data = scanFixture('A', 8);
+  data.rows.push({ ...data.rows[0], code: '000001', symbol: 'sz000001', close: 20 });
+  e.scans[0].resolve(data); await tick();
+  const pending = e.run('updateTracking()');
+  const a = { price: 10, previous_close: 11, date: '2026-10-12 15:00:00', daily_change: -1,
+    daily_change_pct: -9.09, scan_change: 2, scan_change_pct: 25, change: 2, change_pct: 25,
+    status: 'ok', buy_stop_breached: false, breached_types: [] };
+  const b = { ...a, price: 16, previous_close: 15, daily_change: 1, daily_change_pct: 6.67,
+    scan_change: -4, scan_change_pct: -20, change: -4, change_pct: -20 };
+  e.tracking.at(-1).resolve({ quotes: { sh600000: a, sz000001: b }, errors: {}, as_of: 'now' }); await pending;
+  const row = e.el('tb').innerHTML.split('data-symbol="sh600000"')[1].split('</tr>')[0];
+  assert.match(row, /price-down">-1\.00/);
+  assert.match(row, /daily-return-cell[^]*?price-down">-9\.09%/);
+  assert.match(row, /scan-return-cell[^]*?price-up">\+25\.00%/);
+  e.run("S.sort='dpct'; S.dir=-1");
+  assert.equal(e.run('sortedList()[0].symbol'), 'sz000001');
+  e.run("S.sort='pct'; S.dir=-1");
+  assert.equal(e.run('sortedList()[0].symbol'), 'sh600000');
+  e.run("S.sort='chg'; S.dir=-1");
+  assert.equal(e.run('sortedList()[0].symbol'), 'sz000001');
+});
+
+test('drawer daily and scan returns stay separate when one baseline is unavailable', () => {
+  const e = environment(), scanAt = '2026-10-09 15:00:00';
+  e.Drawer.open({ code: '600000', symbol: 'sh600000', scan_at: scanAt, close: 8 });
+  const q = { price: 10, previous_close: 11, daily_change: -1, daily_change_pct: -9.09,
+    scan_change_pct: 25, date: '2026-10-12 15:00:00' };
+  e.Drawer.updateTracking('sh600000', q, scanAt);
+  assert.match(e.el('dwMeta').innerHTML, /当天涨跌值.*price-down">-1\.00/);
+  assert.match(e.el('dwMeta').innerHTML, /当天涨跌幅.*price-down">-9\.09%/);
+  assert.match(e.el('dwMeta').innerHTML, /扫描后至今涨跌幅.*price-up">\+25\.00%/);
+  e.Drawer.updateTracking('sh600000', { ...q, previous_close: null, daily_change: null, daily_change_pct: null }, scanAt);
+  assert.match(e.el('dwMeta').innerHTML, /当天涨跌幅 —/);
+  assert.match(e.el('dwMeta').innerHTML, /扫描后至今涨跌幅.*\+25\.00%/);
+  e.Drawer.updateTracking('sh600000', { ...q, scan_change_pct: null, change_pct: null }, scanAt);
+  assert.match(e.el('dwMeta').innerHTML, /当天涨跌幅.*-9\.09%/);
+  assert.match(e.el('dwMeta').innerHTML, /扫描后至今涨跌幅 —/);
+});
+
 test('all shipped classic scripts parse', () => {
   for (const dir of ['js', 'vendor']) for (const name of fs.readdirSync(path.join(root, 'web', dir))) {
     if (name.endsWith('.js')) new vm.Script(read(dir + '/' + name), { filename: name });

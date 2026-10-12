@@ -222,7 +222,8 @@ def quote_prices(symbols):
     """腾讯当前报价，100 个一批、最多 4 个批次并发；错误按标的返回。
 
     不回填 0 或日 K 缓存。变量名、交易所编号、代码与报价时间均须对应请求，
-    防止同一纯代码在不同交易所之间串用。price/date 是提供方的现价与行情时间。
+    防止同一纯代码在不同交易所之间串用。price/date 是提供方的现价与行情时间，
+    previous_close 是报价字段中的昨收；昨收缺失不应让有效现价一起丢失。
     """
     from concurrent.futures import ThreadPoolExecutor
 
@@ -272,7 +273,14 @@ def quote_prices(symbols):
                 if not re.fullmatch(r"[0-9]{14}", fields[30]):
                     raise ValueError("报价时间格式无效")
                 date = datetime.strptime(fields[30], "%Y%m%d%H%M%S")
-                quotes[symbol] = {"price": price, "date": date.strftime("%Y-%m-%d %H:%M:%S")}
+                try:
+                    previous_close = float(fields[4])
+                    if not math.isfinite(previous_close) or previous_close <= 0:
+                        previous_close = None
+                except (TypeError, ValueError, OverflowError):
+                    previous_close = None
+                quotes[symbol] = {"price": price, "date": date.strftime("%Y-%m-%d %H:%M:%S"),
+                                  "previous_close": previous_close}
             except (TypeError, ValueError) as exc:
                 errors[symbol] = str(exc)
         for symbol in group:

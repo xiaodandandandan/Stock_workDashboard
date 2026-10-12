@@ -140,7 +140,8 @@ function sortedList() {
     d: r => Math.max(...signals(r).map(h => +h.date), 0),
     fr: r => Math.min(...signals(r).map(h => h.fresh), 99),
     st: r => r.close, p: r => r.close, a: r => r.amt,
-    lp: r => quoteFor(r)?.price, chg: r => quoteFor(r)?.change, pct: r => quoteFor(r)?.change_pct,
+    lp: r => quoteFor(r)?.price, chg: r => quoteFor(r)?.daily_change,
+    dpct: r => quoteFor(r)?.daily_change_pct, pct: r => scanReturn(quoteFor(r)),
   }[S.sort] || (r => r.amt);
   list.sort((x, y) => {
     const a = key(x), b = key(y);
@@ -151,6 +152,7 @@ function sortedList() {
 }
 
 function quoteFor(r) { return quotes[r.symbol || normalizeSymbol(r.code)]; }
+function scanReturn(q) { return q?.scan_change_pct ?? q?.change_pct; }
 function signedPrice(value, percent = false) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return '—';
   const cls = value > 0 ? 'price-up' : value < 0 ? 'price-down' : '';
@@ -188,8 +190,9 @@ function renderTable(list) {
       <td class="num">${hs.map(h => h.stop != null ? (+h.stop).toFixed(2) : '—').join('<br>')}</td>
       <td class="num">${r.close != null ? (+r.close).toFixed(2) : '—'}</td>
       <td class="num" title="${esc(q?.date || '行情尚未获取')}">${q?.price != null ? (+q.price).toFixed(2) : '—'}<span class="quote-time">${esc(q?.date || '')}</span></td>
-      <td class="num">${signedPrice(q?.change)}</td>
-      <td class="num scan-return-cell" title="${esc('扫描基准：' + D.generated + '，价格 ' + r.close + '；报价截至：' + (q?.date || '尚未获取'))}">${signedPrice(q?.change_pct, true)}</td>
+      <td class="num" title="${esc('行情交易日：' + (q?.date?.slice(0, 10) || '未知') + '；昨收价：' + (q?.previous_close ?? '尚未获取'))}">${signedPrice(q?.daily_change)}</td>
+      <td class="num daily-return-cell" title="${esc('以行情源昨收价 ' + (q?.previous_close ?? '未知') + ' 为基准；报价截至：' + (q?.date || '尚未获取'))}">${signedPrice(q?.daily_change_pct, true)}</td>
+      <td class="num scan-return-cell" title="${esc('扫描基准：' + D.generated + '，价格 ' + r.close + '；报价截至：' + (q?.date || '尚未获取'))}">${signedPrice(scanReturn(q), true)}</td>
       <td class="tracking-cell">${trackingLabel(r, q)}</td>
       <td class="num">${(+r.amt).toFixed(2)}</td>
     </tr>`;
@@ -227,7 +230,7 @@ function renderStats(t) {
 function renderFoot() {
   document.getElementById('foot').innerHTML =
     `<b>历史跟踪</b>：扫描日期按执行日期分组，同一天可选择不同批次；信号、新鲜度和“扫描时未失效”均以所选快照为准。` +
-    `涨跌以扫描价为基准，当前报价触及或低于原有效买点失效位时标记“触及失效位”；只判断当前价格，不代表期间从未跌破。<br>` +
+    `当天涨跌以昨收价为基准，累计涨跌幅以扫描价为基准；当前报价触及或低于原有效买点失效位时标记“触及失效位”，只判断当前价格，不代表期间从未跌破。<br>` +
     `<b>点开个股</b>：点表格任意一行，右侧滑出该票的缠论 K 线（笔 / 分型 / 中枢 / 买点 / 卖点 / 均线 / MACD 七个图层可开关），` +
     `顶部可切 <b>日线 / 60 分钟 / 30 分钟</b> —— 日线直接读扫描时已算好的缓存，` +
     `分钟线是切过去才向后端要的（现取现算，约 0.3 s）。<br>` +
@@ -272,7 +275,7 @@ function render() {
     `上市板块：${BOARD_LABELS[S.board]}　·　` +
     `新鲜度：${S.fresh >= 99 ? '不限' : (S.fresh === 0 ? '仅当日' : `近 ${S.fresh + 1} 日`)}　·　` +
     `${S.validOnly ? '扫描时未失效' : '含扫描时已失效'}　·　${S.trendOnly ? '仅趋势背驰' : '全部背驰'}` +
-    (list.length > 800 ? '　·　表格最多显示 800 只；最新价 / 涨跌排序仅限已获取行情的个股' : '') +
+    (list.length > 800 ? '　·　表格最多显示 800 只；最新价 / 当天及累计涨跌排序仅限已获取行情的个股' : '') +
     `　·　点任意一行看该票结构`;
   renderFoot();
 }
@@ -361,9 +364,11 @@ async function updateTracking(force = false) {
     quotes = { ...quotes, ...result.quotes };
     renderTable(sortedList());
     syncDrawerTracking();
-    const missing = Object.keys(result.errors || {}).length;
+    const unavailable = Object.values(result.quotes).filter(q => q.status === 'unavailable').length;
+    const incomplete = Object.keys(result.errors || {}).length - unavailable;
     status.textContent = `行情获取于 ${result.as_of} · 本页 ${codes.length} 只` +
-      (missing ? ` · ${missing} 只未获取（显示 —）` : '') + ' · 每只报价时间见最新价';
+      (unavailable ? ` · ${unavailable} 只行情未获取（显示 —）` : '') +
+      (incomplete > 0 ? ` · ${incomplete} 只缺少涨跌基准，对应数值显示 —` : '') + ' · 每只报价时间见最新价';
   } catch (e) {
     if (!trackingGate.isCurrent(ticket) || D !== data) return;
     lastTrackingKey = ''; // allow the next filter change to retry
@@ -422,7 +427,7 @@ function bind() {
     th.addEventListener('click', () => {
       const k = th.dataset.s;
       if (S.sort === k) S.dir = -S.dir;
-      else { S.sort = k; S.dir = ['a', 'd', 'p', 'st', 'fr', 'lp', 'chg', 'pct'].includes(k) ? -1 : 1; }
+      else { S.sort = k; S.dir = ['a', 'd', 'p', 'st', 'fr', 'lp', 'chg', 'dpct', 'pct'].includes(k) ? -1 : 1; }
       refresh();
     });
   });

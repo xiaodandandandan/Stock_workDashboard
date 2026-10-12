@@ -41,6 +41,9 @@ interface ScanPayload {
 }
 interface ScanSnapshot { id: string; generated: string; date: string; freq: Frequency; hit: number; total_scanned: number }
 interface PriceTracking { price: number | null; date: string | null; change: number | null; change_pct: number | null;
+  previous_close: number | null; daily_change: number | null; daily_change_pct: number | null;
+  scan_change: number | null; scan_change_pct: number | null;
+  daily_status: 'ok' | 'unavailable' | 'invalid_previous_close'; scan_status: 'ok' | 'unavailable' | 'invalid_baseline';
   status: 'ok' | 'unavailable' | 'invalid_baseline'; buy_stop_breached: boolean | null; breached_types: string[] }
 interface TrackingPayload { quotes: Record<string, PriceTracking>; as_of: string; errors: Record<string, string>; source: string }
 interface IndustryStatus {

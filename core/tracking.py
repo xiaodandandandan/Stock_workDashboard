@@ -31,12 +31,26 @@ def _symbol(value):
     return symbol
 
 
-def track_rows(rows, codes=None, refresh=False):
-    """Latest price minus the selected snapshot's close, with explicit unknowns.
+def _cache_day():
+    return datetime.now().date().isoformat()
 
-    Only successful raw quotes are cached, for 60 seconds in memory. A historical
-    row is sufficient: it does not need to remain in the latest scan. Each call
-    recomputes changes and stop checks against its own rows; rows are never edited.
+
+def _change(price, baseline):
+    if baseline is None:
+        return None, None
+    percent = (price / baseline - 1) * 100
+    if not math.isfinite(percent):
+        return None, None
+    return round(price - baseline, 4), round(percent, 2)
+
+
+def track_rows(rows, codes=None, refresh=False):
+    """Daily moves use the quote's previous close; scan moves use snapshot close.
+
+    Only raw price/date/previous_close are cached for 60 seconds in memory, never
+    across a new calendar day. A historical row need not remain in the latest scan.
+    Each call recomputes both moves and stop checks; rows are never edited.
+    change/change_pct remain scan-move aliases for compatibility.
     """
     if codes is not None and isinstance(codes, (str, bytes)):
         raise InputError("跟踪代码需为交易所标识数组")
@@ -53,10 +67,11 @@ def track_rows(rows, codes=None, refresh=False):
 
     quotes, errors, missing = {}, {}, []
     now = time.monotonic()
+    cache_day = _cache_day()
     with _LOCK:
         # Expired quotes must not grow indefinitely across many scan dates.
         for symbol in list(_QUOTES):
-            if now - _QUOTES[symbol][0] >= CACHE_TTL:
+            if now - _QUOTES[symbol][0] >= CACHE_TTL or _QUOTES[symbol][2] != cache_day:
                 del _QUOTES[symbol]
         for symbol in by_symbol:
             cached = _QUOTES.get(symbol)
@@ -77,6 +92,7 @@ def track_rows(rows, codes=None, refresh=False):
             received = {}
             errors.update({symbol: "%s: %s" % (type(exc).__name__, exc) for symbol in missing})
         fetched_at = time.monotonic()
+        fetched_day = _cache_day()
         with _LOCK:
             for symbol in missing:
                 quote = received.get(symbol)
@@ -98,21 +114,26 @@ def track_rows(rows, codes=None, refresh=False):
                     errors[symbol] = "当前报价价格或时间无效"
                     _QUOTES.pop(symbol, None)
                     continue
-                good = {"price": price, "date": date}
+                good = {"price": price, "date": date,
+                        "previous_close": _number(quote.get("previous_close"), positive=True)}
                 quotes[symbol] = good
-                _QUOTES[symbol] = (fetched_at, dict(good))
+                _QUOTES[symbol] = (fetched_at, dict(good), fetched_day)
                 errors.pop(symbol, None)
 
     result = {}
     for symbol, row in by_symbol.items():
         quote = quotes.get(symbol)
         if quote is None:
-            result[symbol] = {"price": None, "date": None, "change": None,
-                              "change_pct": None, "status": "unavailable",
+            result[symbol] = {"price": None, "date": None, "previous_close": None,
+                              "daily_change": None, "daily_change_pct": None,
+                              "scan_change": None, "scan_change_pct": None,
+                              "change": None, "change_pct": None, "status": "unavailable",
+                              "daily_status": "unavailable", "scan_status": "unavailable",
                               "buy_stop_breached": None, "breached_types": []}
             continue
         price = quote["price"]
         baseline = _number(row.get("close"), positive=True)
+        previous_close = quote["previous_close"]
         breached = []
         for signal in row.get("buy") or []:
             if not isinstance(signal, dict) or signal.get("valid") != 1:
@@ -122,15 +143,23 @@ def track_rows(rows, codes=None, refresh=False):
                 kind = str(signal.get("type") or "买点")
                 if kind not in breached:
                     breached.append(kind)
-        change = round(price - baseline, 4) if baseline is not None else None
-        change_pct = round((price / baseline - 1) * 100, 2) if baseline is not None else None
-        if change_pct is not None and not math.isfinite(change_pct):
-            baseline, change, change_pct = None, None, None
-        status = "ok" if baseline is not None else "invalid_baseline"
-        if baseline is None:
-            errors[symbol] = "扫描基准收盘价无效，无法计算涨跌"
-        result[symbol] = {"price": price, "date": quote["date"], "change": change,
-                          "change_pct": change_pct, "status": status,
+        daily_change, daily_change_pct = _change(price, previous_close)
+        scan_change, scan_change_pct = _change(price, baseline)
+        daily_status = "ok" if daily_change_pct is not None else "invalid_previous_close"
+        scan_status = "ok" if scan_change_pct is not None else "invalid_baseline"
+        problems = []
+        if daily_status != "ok":
+            problems.append("昨收价无效，无法计算当天涨跌")
+        if scan_status != "ok":
+            problems.append("扫描基准收盘价无效，无法计算扫描后至今涨跌")
+        if problems:
+            errors[symbol] = "；".join(problems)
+        result[symbol] = {"price": price, "date": quote["date"], "previous_close": previous_close,
+                          "daily_change": daily_change, "daily_change_pct": daily_change_pct,
+                          "scan_change": scan_change, "scan_change_pct": scan_change_pct,
+                          "change": scan_change, "change_pct": scan_change_pct,
+                          "status": scan_status, "daily_status": daily_status,
+                          "scan_status": scan_status,
                           "buy_stop_breached": bool(breached), "breached_types": breached}
     return {"quotes": result, "as_of": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "errors": errors, "source": SOURCE}
