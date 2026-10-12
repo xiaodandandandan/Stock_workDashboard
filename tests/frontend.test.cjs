@@ -90,14 +90,27 @@ test('drawer replaces stale unclassified label with fetched industry', async () 
   assert.equal(e.el('dwInd').textContent, '金融');
 });
 
+test('drawer shows scan tracking while chart analysis is pending or unavailable', async () => {
+  const e = environment();
+  e.Drawer.open({ code: '600000', scan_at: '2026-10-09 15:00:00', close: 10,
+    tracking: { price: 9, change_pct: -10, date: '2026-10-12 15:00:00', buy_stop_breached: true } });
+  assert.match(e.el('dwMeta').innerHTML, /扫描后涨跌幅.*-10\.00%/);
+  assert.match(e.el('dwMeta').innerHTML, /触及原买点失效位/);
+  e.pending.shift().reject(new Error('chart unavailable')); await tick();
+  assert.match(e.el('dwMeta').innerHTML, /跟踪扫描 2026-10-09/);
+  assert.match(e.el('dwCard').innerHTML, /chart unavailable/);
+});
+
 test('scan header exposes failed and partial industry data', () => {
   const elements = new Map();
   const el = id => {
-    if (!elements.has(id)) elements.set(id, { innerHTML: '', textContent: '' });
+    if (!elements.has(id)) elements.set(id, { innerHTML: '', textContent: '', style: {} });
     return elements.get(id);
   };
-  const ctx = vm.createContext({ console, document: { getElementById: el },
+  const ctx = vm.createContext({ console, AbortController, clearTimeout,
+    document: { getElementById: el },
     API: { scan: () => new Promise(() => {}) } });
+  vm.runInContext(read('js/state.js'), ctx);
   vm.runInContext(read('js/app.js'), ctx);
   vm.runInContext("D.industry_status = { status: 'failed', missing: 4 }; renderStats({ typeCnt: {} });", ctx);
   assert.match(el('sub').textContent, /行业获取失败/);
@@ -207,6 +220,86 @@ test('API keeps explicit exchange and propagates cancellation', async () => {
   await api.stock('sh000001', 'day', {}, abort.signal);
   assert.equal(seen.url.searchParams.get('code'), 'sh000001');
   assert.equal(seen.init.signal.aborted, true);
+});
+
+function scanFixture(id, price = 10) {
+  return { scan_id: id, generated: '2026-10-09 15:00:00', hit: 1, total_scanned: 1, freq: 'day',
+    rows: [{ code: '600000', symbol: 'sh600000', name: id, industry: '金融', close: price, amt: 2,
+      buy: [{ type: '一类买点', date: '20261009', fresh: 0, valid: 1, stop: 9 }], sell: [] }] };
+}
+function appEnvironment() {
+  const elements = new Map(), scans = [], tracking = [];
+  const el = id => {
+    if (!elements.has(id)) elements.set(id, { innerHTML: '', textContent: '', style: {}, value: '',
+      events: {}, classList: { toggle() {} }, addEventListener(name, fn) { this.events[name] = fn; } });
+    return elements.get(id);
+  };
+  const ctx = vm.createContext({ console, AbortController, URLSearchParams, location: { search: '' },
+    setTimeout: () => 0, clearTimeout() {},
+    document: { getElementById: el, querySelectorAll: () => [] },
+    Drawer: { openCode: null, close() {} },
+    API: {
+      scan: (id, signal) => new Promise(resolve => scans.push({ id, signal, resolve })),
+      scans: async () => ({ snapshots: [{ id: 'A', date: '2026-10-09', generated: '2026-10-09 15:00:00', hit: 1, freq: 'day' }] }),
+      scanStatus: async () => ({ running: false }),
+      tracking: (id, codes, force, signal) => new Promise(resolve => tracking.push({ id, codes, force, signal, resolve })),
+    },
+  });
+  vm.runInContext(read('js/state.js'), ctx);
+  vm.runInContext(read('js/app.js'), ctx);
+  return { ctx, el, scans, tracking, run: code => vm.runInContext(code, ctx) };
+}
+
+test('switching historical scans rejects a late earlier batch', async () => {
+  const e = appEnvironment();
+  const a = e.run("loadScan('A')"), pendingA = e.scans.at(-1);
+  const b = e.run("loadScan('B')"), pendingB = e.scans.at(-1);
+  assert.equal(pendingA.signal.aborted, true);
+  pendingB.resolve(scanFixture('B', 20)); await b;
+  pendingA.resolve(scanFixture('A')); await a;
+  assert.equal(e.run('D.scan_id'), 'B');
+  assert.match(e.el('tb').innerHTML, />20\.00</);
+});
+
+test('late tracking quotes cannot overwrite a newly selected scan baseline', async () => {
+  const e = appEnvironment();
+  e.scans[0].resolve(scanFixture('A')); await tick();
+  const a = e.run('updateTracking()'), pendingA = e.tracking.at(-1);
+  const loadB = e.run("loadScan('B')");
+  e.scans.at(-1).resolve(scanFixture('B', 20)); await loadB;
+  const b = e.run('updateTracking()'), pendingB = e.tracking.at(-1);
+  const quote = { price: 18, date: '2026-10-12 15:00:00', change: -2, change_pct: -10,
+    status: 'ok', buy_stop_breached: false, breached_types: [] };
+  pendingB.resolve({ quotes: { sh600000: quote }, errors: {}, as_of: 'now' }); await b;
+  assert.equal(pendingA.signal.aborted, true);
+  pendingA.resolve({ quotes: { sh600000: { ...quote, change: 8, change_pct: 80 } }, errors: {}, as_of: 'old' }); await a;
+  assert.equal(e.run('quotes.sh600000.change_pct'), -10);
+  assert.equal(e.run('D.rows[0].close'), 20);
+  assert.equal(e.run('D.rows[0].buy[0].valid'), 1);
+  assert.match(e.el('tb').innerHTML, /price-down">-10\.00%/);
+});
+
+test('completing a new scan preserves the historical selection and reset preserves its date', async () => {
+  const e = appEnvironment();
+  e.scans[0].resolve(scanFixture('A')); await tick();
+  e.run("selectedDate='2026-10-09'; selectedSnapshot='A'; S.board='main'");
+  const before = e.scans.length, boot = e.run('boot(true)'); await tick();
+  e.tracking.at(-1).resolve({ quotes: {}, errors: {}, as_of: 'now' }); await boot;
+  assert.equal(e.scans.length, before);
+  assert.equal(e.run('D.scan_id'), 'A');
+  e.el('reset').events.click();
+  assert.equal(e.run('selectedDate'), '2026-10-09');
+  assert.equal(e.run('S.board'), '');
+});
+
+test('price changes show direction, missing values and current stop breach separately', () => {
+  const e = appEnvironment();
+  assert.match(e.run('signedPrice(2.5, true)'), /price-up">\+2\.50%/);
+  assert.match(e.run('signedPrice(-1)'), /price-down">-1\.00/);
+  assert.equal(e.run('signedPrice(null, true)'), '—');
+  assert.equal(e.run('signedPrice(NaN)'), '—');
+  assert.match(e.run("trackingLabel({buy:[]}, {status:'ok',buy_stop_breached:true,breached_types:['一类买点']})"), /触及失效位/);
+  assert.match(e.run("trackingLabel({buy:[]}, {status:'unavailable'})"), /行情未获取/);
 });
 
 test('all shipped classic scripts parse', () => {

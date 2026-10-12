@@ -1,0 +1,136 @@
+"""Track immutable scan rows against current quotes without replaying the engine."""
+import math
+import re
+import threading
+import time
+from datetime import datetime
+
+from . import datasource
+from .validation import InputError
+
+SOURCE = "tencent.qt.gtimg.cn"
+CACHE_TTL = 60
+_QUOTES = {}
+_LOCK = threading.Lock()
+
+
+def _number(value, positive=False):
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) and (not positive or number > 0) else None
+
+
+def _symbol(value):
+    symbol = str(value).strip().lower()
+    if not re.fullmatch(r"(?:sh|sz|bj)[0-9]{6}", symbol):
+        raise InputError("跟踪代码需为 sh/sz/bj + 6 位数字")
+    return symbol
+
+
+def track_rows(rows, codes=None, refresh=False):
+    """Latest price minus the selected snapshot's close, with explicit unknowns.
+
+    Only successful raw quotes are cached, for 60 seconds in memory. A historical
+    row is sufficient: it does not need to remain in the latest scan. Each call
+    recomputes changes and stop checks against its own rows; rows are never edited.
+    """
+    if codes is not None and isinstance(codes, (str, bytes)):
+        raise InputError("跟踪代码需为交易所标识数组")
+    selected = {_symbol(code) for code in codes} if codes is not None else None
+    by_symbol = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise InputError("扫描个股数据无效")
+        symbol = _symbol(row.get("symbol", ""))
+        if selected is None or symbol in selected:
+            if symbol in by_symbol:
+                raise InputError("扫描包含重复标的：%s" % symbol)
+            by_symbol[symbol] = row
+
+    quotes, errors, missing = {}, {}, []
+    now = time.monotonic()
+    with _LOCK:
+        # Expired quotes must not grow indefinitely across many scan dates.
+        for symbol in list(_QUOTES):
+            if now - _QUOTES[symbol][0] >= CACHE_TTL:
+                del _QUOTES[symbol]
+        for symbol in by_symbol:
+            cached = _QUOTES.get(symbol)
+            if not refresh and cached is not None:
+                quotes[symbol] = dict(cached[1])
+            else:
+                missing.append(symbol)
+    if missing:
+        try:
+            fetched = datasource.quote_prices(missing)
+            if (not isinstance(fetched, dict) or not isinstance(fetched.get("quotes"), dict)
+                    or not isinstance(fetched.get("errors", {}), dict)):
+                raise ValueError("当前报价响应无效")
+            received = fetched["quotes"]
+            errors.update({symbol: message for symbol, message in fetched.get("errors", {}).items()
+                           if symbol in missing})
+        except Exception as exc:
+            received = {}
+            errors.update({symbol: "%s: %s" % (type(exc).__name__, exc) for symbol in missing})
+        fetched_at = time.monotonic()
+        with _LOCK:
+            for symbol in missing:
+                quote = received.get(symbol)
+                if not isinstance(quote, dict):
+                    errors.setdefault(symbol, "当前报价缺失")
+                    # Explicit refresh failures cannot fall back to an old price.
+                    _QUOTES.pop(symbol, None)
+                    continue
+                price = _number(quote.get("price"), positive=True)
+                date = quote.get("date")
+                try:
+                    if not isinstance(date, str) or not re.fullmatch(
+                            r"[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}", date):
+                        raise ValueError("date")
+                    datetime.strptime(date, "%Y-%m-%d %H:%M:%S")
+                except ValueError:
+                    date = None
+                if price is None or date is None:
+                    errors[symbol] = "当前报价价格或时间无效"
+                    _QUOTES.pop(symbol, None)
+                    continue
+                good = {"price": price, "date": date}
+                quotes[symbol] = good
+                _QUOTES[symbol] = (fetched_at, dict(good))
+                errors.pop(symbol, None)
+
+    result = {}
+    for symbol, row in by_symbol.items():
+        quote = quotes.get(symbol)
+        if quote is None:
+            result[symbol] = {"price": None, "date": None, "change": None,
+                              "change_pct": None, "status": "unavailable",
+                              "buy_stop_breached": None, "breached_types": []}
+            continue
+        price = quote["price"]
+        baseline = _number(row.get("close"), positive=True)
+        breached = []
+        for signal in row.get("buy") or []:
+            if not isinstance(signal, dict) or signal.get("valid") != 1:
+                continue
+            stop = _number(signal.get("stop"), positive=True)
+            if stop is not None and price <= stop:
+                kind = str(signal.get("type") or "买点")
+                if kind not in breached:
+                    breached.append(kind)
+        change = round(price - baseline, 4) if baseline is not None else None
+        change_pct = round((price / baseline - 1) * 100, 2) if baseline is not None else None
+        if change_pct is not None and not math.isfinite(change_pct):
+            baseline, change, change_pct = None, None, None
+        status = "ok" if baseline is not None else "invalid_baseline"
+        if baseline is None:
+            errors[symbol] = "扫描基准收盘价无效，无法计算涨跌"
+        result[symbol] = {"price": price, "date": quote["date"], "change": change,
+                          "change_pct": change_pct, "status": status,
+                          "buy_stop_breached": bool(breached), "breached_types": breached}
+    return {"quotes": result, "as_of": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "errors": errors, "source": SOURCE}

@@ -10,7 +10,9 @@
     GET  /                        工作台页面（web/index.html）
     GET  /<静态资源>               web/ 下的 css / js / vendor
     GET  /api/health               服务与数据状态
-    GET  /api/scan                 最近一次扫描结果
+    GET  /api/scan?snapshot=       最新或指定历史扫描结果
+    GET  /api/scans                扫描日期与批次目录
+    GET  /api/tracking             所选快照个股相对扫描价的当前涨跌
     POST /api/scan                 触发一次全市场扫描（后台跑，立即返回）
     GET  /api/scan/status          扫描进度
     GET  /api/stock?code=&freq=    单票：日 K 走缓存秒回，分钟线现取现算
@@ -35,6 +37,7 @@ from core import WEB, CACHE                              # noqa: E402
 from core import datasource as DS                        # noqa: E402
 from core import engine as E                             # noqa: E402
 from core import store as ST                             # noqa: E402
+from core import tracking as TR                          # noqa: E402
 from core import engine_identity                         # noqa: E402
 from core.validation import InputError, integer          # noqa: E402
 
@@ -206,10 +209,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
-        self.end_headers()
         try:
+            self.end_headers()
             self.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pass
 
     def send_file(self, full):
@@ -226,10 +229,10 @@ class Handler(BaseHTTPRequestHandler):
         # 静态资源一律 no-cache：这是本地单机工具，改完刷新就该生效，
         # 让人「改了没反应、要清缓存」的代价远大于省下的一点 IO。
         self.send_header("Cache-Control", "no-cache")
-        self.end_headers()
         try:
+            self.end_headers()
             self.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pass
 
     # ---- 路由
@@ -285,11 +288,35 @@ class Handler(BaseHTTPRequestHandler):
                 "engine": engine_identity(E.K),
             })
 
+        if p == "/api/scans":
+            return self.send_json({"snapshots": ST.list_scans()})
+
         if p == "/api/scan":
-            s = ST.load_scan()
+            snapshot = one("snapshot").strip()
+            s = ST.load_scan(snapshot or None)
             if not s:
-                return self.send_json({"error": "还没有扫描结果，先 POST /api/scan"}, 404)
+                return self.send_json({"error": "扫描快照不存在" if snapshot else
+                                      "还没有扫描结果，先 POST /api/scan"}, 404)
             return self.send_json(s)
+
+        if p == "/api/tracking":
+            snapshot = one("snapshot").strip()
+            refresh = one("refresh", "0")
+            if refresh not in ("0", "1"):
+                raise InputError("refresh 必须是 0 或 1")
+            raw_codes = one("codes")
+            if not raw_codes or len(raw_codes) > 9000:
+                raise InputError("codes 必须指定 1～800 个股票代码")
+            codes = raw_codes.split(",")
+            if len(codes) > 800 or any(not code for code in codes):
+                raise InputError("codes 必须指定 1～800 个股票代码")
+            codes = [DS.to_symbol(code) for code in codes]
+            s = ST.load_scan(snapshot or None)
+            if not s:
+                return self.send_json({"error": "扫描快照不存在"}, 404)
+            result = TR.track_rows(s.get("rows", []), codes=codes, refresh=refresh == "1")
+            result["scan_id"] = s.get("scan_id", snapshot)
+            return self.send_json(result)
 
         if p == "/api/scan/status":
             with JOB_LOCK:

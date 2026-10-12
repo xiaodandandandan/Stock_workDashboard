@@ -42,7 +42,7 @@ const Drawer = (() => {
     el('dwReport').textContent = '';
     el('dwBody').scrollTop = 0;
     syncFreqBtns();
-    el('dwMeta').textContent = '载入中…';
+    el('dwMeta').innerHTML = trackingMetaHTML() + 'K 线载入中…';
     el('dwCard').innerHTML = '';
     el('drawer').classList.add('on');
     el('drawer').setAttribute('aria-hidden', 'false');
@@ -94,7 +94,7 @@ const Drawer = (() => {
     el('dwReport').textContent = '';
     clearChart();
     el('dwCard').innerHTML = '';
-    el('dwMeta').textContent = freq === f ? '载入中…' : el('dwMeta').textContent;
+    el('dwMeta').innerHTML = trackingMetaHTML() + 'K 线载入中…';
     try {
       const d = cache[f] || await API.stock(stock.symbol || stock.code, f, {}, ticket.signal);
       if (!active || !chartGate.isCurrent(ticket) || cur !== stock || freq !== f) return;
@@ -102,18 +102,28 @@ const Drawer = (() => {
       render(d);
     } catch (e) {
       if (!active || !chartGate.isCurrent(ticket)) return;
-      el('dwMeta').innerHTML = '';
+      el('dwMeta').innerHTML = trackingMetaHTML();
       el('dwCard').innerHTML = `<div class="dw-err">载入失败：${esc(e.message)}</div>`;
     }
   }
 
   /* ---------------- 渲染 ---------------- */
+  function trackingMetaHTML() {
+    const q = cur?.tracking;
+    const change = q?.change_pct;
+    const color = change > 0 ? 'price-up' : change < 0 ? 'price-down' : '';
+    return cur?.scan_at ?
+      `<span>跟踪扫描 ${esc(cur.scan_at)} · 扫描价 <b>${cur.close != null ? (+cur.close).toFixed(2) : '—'}</b>` +
+      ` · 最新报价 <b>${q?.price != null ? (+q.price).toFixed(2) : '—'}</b>` +
+      ` · 扫描后涨跌幅 <span class="${color}">${change != null ? (change > 0 ? '+' : '') + change.toFixed(2) + '%' : '—'}</span>` +
+      `${q?.buy_stop_breached ? ' · 触及原买点失效位' : ''} · 报价时间 ${esc(q?.date || '未获取')}</span>` : '';
+  }
   function render(d) {
     // 头部信息
     el('dwInd').textContent = d.industry || '';
     const st = d.structure || {};
     el('dwMeta').innerHTML =
-      `现价 <b>${d.close != null ? (+d.close).toFixed(2) : '—'}</b>` +
+      trackingMetaHTML() + `K 线末价 <b>${d.close != null ? (+d.close).toFixed(2) : '—'}</b>` +
       `　估算成交额 <b>${(+d.amt).toFixed(2)} 亿</b>` +
       `　${esc(d.unit)} <b>${d.bars}</b> 根` +
       (st.ZD != null

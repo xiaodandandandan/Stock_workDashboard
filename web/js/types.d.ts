@@ -2,7 +2,8 @@ type Frequency = 'day' | 'm60' | 'm30' | 'm15' | 'm5';
 type SymbolId = `sh${string}` | `sz${string}` | `bj${string}` | `hk${string}`;
 type StrokePoint = [number, number, number];
 interface RequestTicket { id: number; signal: AbortSignal }
-interface StockRef { code: string; symbol?: SymbolId; name?: string; industry?: string }
+interface StockRef { code: string; symbol?: SymbolId; name?: string; industry?: string;
+  scan_at?: string; tracking?: PriceTracking; close?: number }
 interface SignalReason { k: string; v: string; need?: string; ok: boolean | number }
 interface Signal {
   type: string; date: string; stop: number | null; fresh: number;
@@ -36,7 +37,12 @@ interface ScanPayload {
   rows: ScanRow[]; generated: string; hit: number; total_scanned: number; elapsed: number;
   lookback: number; count: number; freq: Frequency; errors: number; complete: boolean;
   industry_status?: IndustryStatus;
+  scan_id?: string;
 }
+interface ScanSnapshot { id: string; generated: string; date: string; freq: Frequency; hit: number; total_scanned: number }
+interface PriceTracking { price: number | null; date: string | null; change: number | null; change_pct: number | null;
+  status: 'ok' | 'unavailable' | 'invalid_baseline'; buy_stop_breached: boolean | null; breached_types: string[] }
+interface TrackingPayload { quotes: Record<string, PriceTracking>; as_of: string; errors: Record<string, string>; source: string }
 interface IndustryStatus {
   status: 'ok' | 'partial' | 'failed'; matched: number; missing: number; total: number; error: string;
 }

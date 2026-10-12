@@ -56,11 +56,25 @@ const API = {
   },
 
   health() { return this.request('/api/health'); },
-  /** @returns {Promise<ScanPayload>} */
-  async scan() {
-    const body = await this.request('/api/scan');
+  /** @param {string} [snapshot] @param {AbortSignal} [signal] @returns {Promise<ScanPayload>} */
+  async scan(snapshot = '', signal) {
+    const body = await this.request('/api/scan', { snapshot: snapshot || undefined }, { signal });
     if (!isRecord(body) || !Array.isArray(body.rows)) throw new Error('榜单数据不完整');
     return /** @type {ScanPayload} */ (/** @type {unknown} */ (body));
+  },
+  /** @returns {Promise<{snapshots: ScanSnapshot[]}>} */
+  async scans() {
+    const body = await this.request('/api/scans');
+    if (!isRecord(body) || !Array.isArray(body.snapshots)) throw new Error('扫描历史数据不完整');
+    return /** @type {{snapshots: ScanSnapshot[]}} */ (/** @type {unknown} */ (body));
+  },
+  /** @param {string} snapshot @param {string[]} codes @param {boolean} [refresh]
+   * @param {AbortSignal} [signal] @returns {Promise<TrackingPayload>} */
+  async tracking(snapshot, codes, refresh = false, signal) {
+    const body = await this.request('/api/tracking', { snapshot: snapshot || undefined,
+      codes: codes.join(','), refresh: refresh ? 1 : 0 }, { signal });
+    if (!isRecord(body) || !isRecord(body.quotes)) throw new Error('跟踪行情数据不完整');
+    return /** @type {TrackingPayload} */ (/** @type {unknown} */ (body));
   },
   /** @returns {Promise<ScanStatus>} */
   async scanStatus() { return /** @type {ScanStatus} */ (await this.request('/api/scan/status')); },

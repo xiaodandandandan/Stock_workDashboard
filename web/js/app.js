@@ -27,6 +27,9 @@ const S = {
   tab: 0, fresh: 0, validOnly: true, amt: 0, board: '', ind: '', q: '',
   exclST: true, exclBJ: false, trendOnly: false, sort: 'a', dir: -1,
 };
+let snapshots = [], selectedDate = '', selectedSnapshot = '', loadedSnapshot = '';
+let scanLoading = false, quotes = {}, quoteTimer = null, lastTrackingKey = '';
+const scanGate = new RequestGate(), trackingGate = new RequestGate();
 
 const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g,
   c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -137,18 +140,35 @@ function sortedList() {
     d: r => Math.max(...signals(r).map(h => +h.date), 0),
     fr: r => Math.min(...signals(r).map(h => h.fresh), 99),
     st: r => r.close, p: r => r.close, a: r => r.amt,
+    lp: r => quoteFor(r)?.price, chg: r => quoteFor(r)?.change, pct: r => quoteFor(r)?.change_pct,
   }[S.sort] || (r => r.amt);
   list.sort((x, y) => {
     const a = key(x), b = key(y);
+    if (a == null || b == null) return a == null ? (b == null ? 0 : 1) : -1;
     return typeof a === 'string' ? S.dir * a.localeCompare(b) : S.dir * (a - b);
   });
   return list;
+}
+
+function quoteFor(r) { return quotes[r.symbol || normalizeSymbol(r.code)]; }
+function signedPrice(value, percent = false) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '—';
+  const cls = value > 0 ? 'price-up' : value < 0 ? 'price-down' : '';
+  return `<span class="${cls}">${value > 0 ? '+' : ''}${value.toFixed(2)}${percent ? '%' : ''}</span>`;
+}
+function trackingLabel(r, q) {
+  if (!q || q.status === 'unavailable') return '<span class="tracking-state">行情未获取</span>';
+  if (q.status === 'invalid_baseline') return '<span class="tracking-state">扫描价缺失</span>';
+  if (q.buy_stop_breached) return `<span class="tracking-state breached" title="${esc((q.breached_types || []).join('、'))}当前报价触及或低于当次失效位">触及失效位</span>`;
+  const hasStop = r.buy.some(h => h.valid === 1 && Number.isFinite(h.stop) && h.stop > 0);
+  return `<span class="tracking-state">${hasStop ? '高于失效位' : '无可跟踪买点'}</span>`;
 }
 
 function renderTable(list) {
   const tb = document.getElementById('tb');
   tb.innerHTML = list.slice(0, 800).map(r => {
     const hs = signals(r);
+    const q = quoteFor(r);
     const tags = hs.map(h => {
       const cls = CLS[h.type] || 'bx';
       const tr = h.trend === 1 ? ' tr' : '';
@@ -167,6 +187,10 @@ function renderTable(list) {
       <td>${hs.map(h => fmtFresh(h.fresh)).join('<br>')}</td>
       <td class="num">${hs.map(h => h.stop != null ? (+h.stop).toFixed(2) : '—').join('<br>')}</td>
       <td class="num">${r.close != null ? (+r.close).toFixed(2) : '—'}</td>
+      <td class="num" title="${esc(q?.date || '行情尚未获取')}">${q?.price != null ? (+q.price).toFixed(2) : '—'}<span class="quote-time">${esc(q?.date || '')}</span></td>
+      <td class="num">${signedPrice(q?.change)}</td>
+      <td class="num">${signedPrice(q?.change_pct, true)}</td>
+      <td>${trackingLabel(r, q)}</td>
       <td class="num">${(+r.amt).toFixed(2)}</td>
     </tr>`;
   }).join('');
@@ -193,7 +217,7 @@ function renderStats(t) {
        <div class="v ${c}">${v}</div>
      </div>`).join('');
   document.getElementById('sub').textContent =
-    `数据时间 ${D.generated}　·　${D.freq || 'day'} ${D.count || 800} 根　·　扫描耗时 ${D.elapsed}s` +
+    `${selectedDate ? '历史扫描' : '最新扫描'} ${D.generated}　·　${D.freq || 'day'} ${D.count || 800} 根　·　扫描耗时 ${D.elapsed}s` +
     (D.errors ? `　·　⚠ ${D.errors} 只分析失败，榜单不完整` : '') +
     (D.industry_status?.status === 'failed' ? '　·　⚠ 行业获取失败，请重新扫描' :
       (D.industry_status?.missing ? `　·　⚠ ${D.industry_status.missing} 只缺少行业分类` : '')) +
@@ -202,10 +226,12 @@ function renderStats(t) {
 
 function renderFoot() {
   document.getElementById('foot').innerHTML =
+    `<b>历史跟踪</b>：扫描日期按执行日期分组，同一天可选择不同批次；信号、新鲜度和“扫描时未失效”均以所选快照为准。` +
+    `涨跌以扫描价为基准，当前报价触及或低于原有效买点失效位时标记“触及失效位”；只判断当前价格，不代表期间从未跌破。<br>` +
     `<b>点开个股</b>：点表格任意一行，右侧滑出该票的缠论 K 线（笔 / 分型 / 中枢 / 买点 / 卖点 / 均线 / MACD 七个图层可开关），` +
     `顶部可切 <b>日线 / 60 分钟 / 30 分钟</b> —— 日线直接读扫描时已算好的缓存，` +
     `分钟线是切过去才向后端要的（现取现算，约 0.3 s）。<br>` +
-    `<b>新鲜度</b>：信号「首次可察觉距今几根」。做法是对最后 ${LB} 根逐根重跑引擎（<code>detect(bars[:i+1])</code>），` +
+    `<b>新鲜度</b>：信号「首次可察觉距扫描末根几根」。做法是对最后 ${LB} 根逐根重跑引擎（<code>detect(bars[:i+1])</code>），` +
     `信号第一次出现的那一轮就是它的年龄 —— <b>「当日」= 最后一根 K 线才首次报出</b>，不是「信号日期是今天」。<br>` +
     `<b>未失效</b>：买点要求现价仍在失效位之上、卖点仍在之下。引擎对一类买点不校验当前价，` +
     `报出后价格若跌破本段底、笔端点未确认，信号仍会挂着 —— 那些是「已失效」，默认过滤（标签上仍可见删除线）。<br>` +
@@ -219,11 +245,13 @@ function renderFoot() {
 //   后加载的同名函数会把它整个盖掉 —— 抽屉就再也画不出图（实测踩过：
 //   canvas 停在默认 300x150，页面上留一块空白，看着像「这只票没结构」）。
 function refresh() {
+  if (scanLoading) return;
   // ★ 渲染出错必须**看得见**。之前 tabSignals 抛异常时，tab 高亮已经更新、
   //   列表停在旧内容 —— 表面上像「筛选没生效」，完全查不出是代码炸了。
   //   把异常显性化到提示行，同类问题下次一眼可见。
   try {
     render();
+    scheduleTracking();
   } catch (e) {
     console.error(e);
     document.getElementById('hint').innerHTML =
@@ -243,9 +271,102 @@ function render() {
     `筛选出 ${list.length} 只（原始命中 ${D.hit} 只）　·　` +
     `上市板块：${BOARD_LABELS[S.board]}　·　` +
     `新鲜度：${S.fresh >= 99 ? '不限' : (S.fresh === 0 ? '仅当日' : `近 ${S.fresh + 1} 日`)}　·　` +
-    `${S.validOnly ? '仅未失效' : '含已失效'}　·　${S.trendOnly ? '仅趋势背驰' : '全部背驰'}` +
+    `${S.validOnly ? '扫描时未失效' : '含扫描时已失效'}　·　${S.trendOnly ? '仅趋势背驰' : '全部背驰'}` +
+    (list.length > 800 ? '　·　表格最多显示 800 只；最新价 / 涨跌排序仅限已获取行情的个股' : '') +
     `　·　点任意一行看该票结构`;
   renderFoot();
+}
+
+/* 历史信号只读取快照；行情独立更新，异步响应不能跨快照覆盖。 */
+function renderArchiveOptions() {
+  const dates = [...new Set(snapshots.map(x => x.date))];
+  const dateEl = document.getElementById('scanDate');
+  dateEl.innerHTML = '<option value="">最新扫描</option>' + dates.map(date =>
+    `<option value="${esc(date)}">${esc(date)}</option>`).join('');
+  dateEl.value = selectedDate;
+  const runs = snapshots.filter(x => x.date === selectedDate);
+  document.getElementById('scanRunField').hidden = !selectedDate;
+  document.getElementById('scanRun').innerHTML = runs.map(x =>
+    `<option value="${esc(x.id)}">${esc(x.generated.slice(11))} · ${esc(x.freq)} · ${x.hit} 只</option>`).join('');
+  document.getElementById('scanRun').value = selectedSnapshot;
+}
+async function reloadArchives() {
+  try {
+    snapshots = (await API.scans()).snapshots;
+    renderArchiveOptions();
+  } catch (e) {
+    setScanSt('扫描历史读取失败：' + e.message, true);
+  }
+}
+async function loadScan(snapshot = '') {
+  const ticket = scanGate.begin();
+  trackingGate.cancel();
+  clearTimeout(quoteTimer);
+  scanLoading = true;
+  lastTrackingKey = '';
+  quotes = {};
+  if (typeof Drawer !== 'undefined' && Drawer.openCode) Drawer.close();
+  document.getElementById('tb').innerHTML = '';
+  document.getElementById('stats').innerHTML = '';
+  document.getElementById('empty').style.display = 'none';
+  document.getElementById('hint').textContent = '正在载入所选扫描…';
+  document.getElementById('quoteSt').textContent = '';
+  document.getElementById('btnQuotes').disabled = true;
+  try {
+    const data = await API.scan(snapshot, ticket.signal);
+    if (!scanGate.isCurrent(ticket)) return false;
+    D = data;
+    loadedSnapshot = data.scan_id || snapshot;
+    LB = D.lookback ?? 5;
+    // Industry names can change across snapshots; a missing old choice should not hide every row.
+    if (S.ind && !D.rows.some(r => r.industry === S.ind)) S.ind = '';
+    scanLoading = false;
+    refresh();
+    return true;
+  } catch (e) {
+    if (!scanGate.isCurrent(ticket)) return false;
+    scanLoading = false;
+    D = { ...D, rows: [], hit: 0, total_scanned: 0 };
+    document.getElementById('hint').textContent = '扫描读取失败：' + e.message;
+    document.getElementById('sub').textContent = e.status === 404 && !snapshot ?
+      '还没有扫描结果 —— 点右上角“重新扫描”' : '所选扫描未能读取';
+    setScanSt(e.status === 404 && !snapshot ? '待扫描' : ('读取失败：' + e.message), true);
+    return false;
+  }
+}
+function scheduleTracking() {
+  clearTimeout(quoteTimer);
+  quoteTimer = setTimeout(() => updateTracking(), 200);
+}
+async function updateTracking(force = false) {
+  if (scanLoading) return;
+  const data = D, snapshot = loadedSnapshot;
+  const codes = sortedList().slice(0, 800).map(r => r.symbol || normalizeSymbol(r.code));
+  const key = `${snapshot || D.generated}:${[...codes].sort().join(',')}`;
+  if (!force && key === lastTrackingKey) return;
+  lastTrackingKey = key;
+  const ticket = trackingGate.begin();
+  const btn = document.getElementById('btnQuotes'), status = document.getElementById('quoteSt');
+  if (!codes.length) { btn.disabled = false; status.textContent = '当前列表没有需要跟踪的个股'; return; }
+  btn.disabled = true;
+  status.textContent = `正在更新 ${codes.length} 只个股的行情…`;
+  try {
+    const result = await API.tracking(snapshot, codes, force, ticket.signal);
+    if (!trackingGate.isCurrent(ticket) || D !== data) return;
+    quotes = { ...quotes, ...result.quotes };
+    renderTable(sortedList());
+    const missing = Object.keys(result.errors || {}).length;
+    status.textContent = `行情获取于 ${result.as_of} · 本页 ${codes.length} 只` +
+      (missing ? ` · ${missing} 只未获取（显示 —）` : '') + ' · 每只报价时间见最新价';
+  } catch (e) {
+    if (!trackingGate.isCurrent(ticket) || D !== data) return;
+    lastTrackingKey = ''; // allow the next filter change to retry
+    quotes = {};
+    renderTable(sortedList());
+    status.textContent = '行情更新失败：' + e.message + '，可点击“刷新行情”重试';
+  } finally {
+    if (trackingGate.isCurrent(ticket)) btn.disabled = false;
+  }
 }
 
 /* ---------------- 事件 ---------------- */
@@ -262,6 +383,14 @@ function bind() {
     S.tab = +c.dataset.tab; refresh();
   });
   const on = (id, ev, fn) => document.getElementById(id).addEventListener(ev, fn);
+  on('scanDate', 'change', e => {
+    selectedDate = e.target.value;
+    selectedSnapshot = selectedDate ? (snapshots.find(x => x.date === selectedDate)?.id || '') : '';
+    renderArchiveOptions();
+    loadScan(selectedSnapshot);
+  });
+  on('scanRun', 'change', e => { selectedSnapshot = e.target.value; loadScan(selectedSnapshot); });
+  on('btnQuotes', 'click', () => { clearTimeout(quoteTimer); updateTracking(true); });
   on('fresh', 'change', e => { S.fresh = +e.target.value; refresh(); });
   on('amt', 'change', e => { S.amt = +e.target.value; refresh(); });
   on('board', 'change', e => { S.board = e.target.value; refresh(); });
@@ -286,7 +415,7 @@ function bind() {
     th.addEventListener('click', () => {
       const k = th.dataset.s;
       if (S.sort === k) S.dir = -S.dir;
-      else { S.sort = k; S.dir = ['a', 'd', 'p', 'st', 'fr'].includes(k) ? -1 : 1; }
+      else { S.sort = k; S.dir = ['a', 'd', 'p', 'st', 'fr', 'lp', 'chg', 'pct'].includes(k) ? -1 : 1; }
       refresh();
     });
   });
@@ -299,7 +428,7 @@ function bind() {
     }
     const tr = e.target.closest('tr[data-symbol]'); if (!tr) return;
     const row = D.rows.find(r => (r.symbol || normalizeSymbol(r.code)) === tr.dataset.symbol);
-    if (row) Drawer.open(row, D.freq || 'day');
+    if (row) Drawer.open({ ...row, scan_at: D.generated, tracking: quoteFor(row) }, D.freq || 'day');
   });
   on('btnScan', 'click', startScan);
 }
@@ -349,19 +478,16 @@ function pollScan() {
 
 /* ---------------- 启动 ---------------- */
 async function boot(silent) {
-  let ok = true;
-  try {
-    D = await API.scan();
-  } catch (e) {
-    ok = false;
-    document.getElementById('sub').textContent =
-      '还没有扫描结果 —— 点右上角「重新扫描」跑一次全市场（沪深 A 约 2~4 分钟）';
-    setScanSt(e.status === 404 ? '待扫描' : ('读取失败：' + e.message), true);
+  if (silent) {
+    await reloadArchives();
+    // A background scan must not replace the historical batch being reviewed.
+    if (selectedDate) { await updateTracking(true); return; }
   }
+  const ok = await loadScan(selectedSnapshot);
   // ★ bind() 无条件调用：首次使用时本来就没有扫描结果，如果这时不绑事件，
   //   「重新扫描」按钮永远点不动 —— 页面直接死锁在空状态。
   bind();
-  if (ok) { LB = D.lookback ?? 5; refresh(); }
+  if (!silent) await reloadArchives();
   // Reconnect to an already running scan, including first launch via --scan.
   if (!silent) {
     try {
@@ -372,7 +498,7 @@ async function boot(silent) {
   // ?open=601138[&freq=m60] —— 直接展开某只票的抽屉（调试 / 分享具体标的时用）
   const qs = new URLSearchParams(location.search);
   const want = qs.get('open');
-  if (want && !Drawer.openCode) {
+  if (ok && want && !Drawer.openCode) {
     try {
       const symbol = normalizeSymbol(want);
       const r = D.rows.find(x => (x.symbol || normalizeSymbol(x.code)) === symbol) ||

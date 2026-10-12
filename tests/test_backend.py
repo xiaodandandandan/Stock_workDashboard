@@ -138,6 +138,15 @@ class BackendTests(unittest.TestCase):
             store.save_scan(dict(generated='2026-10-11 12:00:00', rows=[], hit=0))
         self.assertEqual(store.load_scan(), old)
 
+    def test_cancelled_browser_response_is_not_a_server_failure(self):
+        handler = object.__new__(server.Handler)
+        handler.send_response = lambda *args: None
+        handler.send_header = lambda *args: None
+        handler.wfile = io.BytesIO()
+        with patch.object(handler, 'end_headers', side_effect=ConnectionAbortedError('browser cancelled')):
+            handler.send_json({'rows': []})
+        self.assertEqual(handler.wfile.getvalue(), b'')
+
     def test_compute_failure_is_separate_from_fetch_failure(self):
         old = self.saved_scan()
         with patch.object(ds, 'market_list', return_value=[dict(symbol='sh600000', code='600000', name='A')]), \
@@ -353,6 +362,39 @@ class HttpValidationTests(unittest.TestCase):
                       'code=600000&report=2'):
             with self.subTest(query=query):
                 self.assertEqual(self.request('GET', '/api/stock?' + query)[0], 400)
+
+    def test_scan_archive_routes_select_exact_snapshot(self):
+        item = dict(id='20261009-150000', generated='2026-10-09 15:00:00', date='2026-10-09', hit=1)
+        with patch.object(store, 'list_scans', return_value=[item]):
+            code, body = self.request('GET', '/api/scans')
+            self.assertEqual(code, 200)
+            self.assertEqual(json.loads(body)['snapshots'], [item])
+        with patch.object(store, 'load_scan', return_value={'rows': [], 'scan_id': item['id']}) as load:
+            code, body = self.request('GET', '/api/scan?snapshot=' + item['id'])
+            self.assertEqual(code, 200)
+            load.assert_called_once_with(item['id'])
+        with patch.object(store, 'load_scan', return_value=None):
+            self.assertEqual(self.request('GET', '/api/scan?snapshot=' + item['id'])[0], 404)
+        self.assertEqual(self.request('GET', '/api/scan?snapshot=../outside')[0], 400)
+
+    def test_tracking_route_passes_selected_snapshot_and_refresh(self):
+        rows = [dict(symbol='sh600000', close=10, buy=[])]
+        with patch.object(store, 'load_scan', return_value={'rows': rows, 'scan_id': '20261009-150000'}) as load, \
+             patch.object(server.TR, 'track_rows', return_value={'quotes': {}, 'errors': {}}) as track:
+            code, body = self.request('GET', '/api/tracking?snapshot=20261009-150000&codes=sh600000&refresh=1')
+            self.assertEqual(code, 200)
+            load.assert_called_once_with('20261009-150000')
+            track.assert_called_once_with(rows, codes=['sh600000'], refresh=True)
+            self.assertEqual(json.loads(body)['scan_id'], '20261009-150000')
+
+    def test_invalid_tracking_parameters_never_fetch_quotes(self):
+        with patch.object(server.TR, 'track_rows') as track:
+            for query in ('', 'codes=../x', 'codes=sh600000&refresh=2', 'codes=sh600000,,sz000001',
+                          'codes=' + ','.join(['sh600000'] * 801),
+                          'snapshot=../x&codes=sh600000'):
+                with self.subTest(query=query):
+                    self.assertEqual(self.request('GET', '/api/tracking?' + query)[0], 400)
+            track.assert_not_called()
 
 
 if __name__ == '__main__': unittest.main()

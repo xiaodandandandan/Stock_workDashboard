@@ -12,8 +12,12 @@ import json
 import hashlib
 import logging
 import os
+import re
+import stat
 import tempfile
+import threading
 import time
+from datetime import datetime
 
 from . import CACHE
 from .validation import InputError, to_symbol
@@ -22,6 +26,10 @@ LOG = logging.getLogger(__name__)
 
 KLINE_DIR = os.path.join(CACHE, "kline")
 SCAN_DIR = os.path.join(CACHE, "scan")
+_SCAN_LOCK = threading.RLock()
+_SCAN_ID = re.compile(r"[0-9]{8}-[0-9]{6}(?:-[0-9]{3,9})?")
+_SCAN_METADATA_CACHE = {}
+_SCAN_METADATA_DIRECTORY = None
 
 # Cache lifetime in seconds; both daily and intraday bars can change during trading.
 TTL = {"day": 6 * 3600, "m60": 600, "m30": 600, "m15": 600, "m5": 600}
@@ -116,18 +124,137 @@ def load_kline(freq, code, max_age=None):
 
 
 # ---------------------------------------------------------------- 扫描结果
+def _validate_scan_id(stamp):
+    if not isinstance(stamp, str) or not _SCAN_ID.fullmatch(stamp):
+        raise InputError("无效的扫描记录 ID")
+    try:
+        datetime.strptime(stamp[:15], "%Y%m%d-%H%M%S")
+    except ValueError as exc:
+        raise InputError("无效的扫描记录日期") from exc
+    return stamp
+
+
 def scan_path(stamp=None):
-    return os.path.join(SCAN_DIR, (stamp + ".json") if stamp else "latest.json")
+    name = "latest.json" if stamp is None else _validate_scan_id(stamp) + ".json"
+    return os.path.join(SCAN_DIR, name)
 
 
-def save_scan(payload, keep_snapshots=8):
-    """写 latest.json + 一份带日期的快照；快照只留最近 N 份。"""
-    stamp = str(payload.get("generated", "")).replace("-", "").replace(":", "").replace(" ", "-")
-    if stamp:
-        write_json(scan_path(stamp), payload)
-    # Publish last: failure to create a snapshot must not replace the prior result.
-    write_json(scan_path(), payload)
-    if stamp:
+def _generated_stamp(generated):
+    try:
+        parsed = datetime.strptime(generated, "%Y-%m-%d %H:%M:%S")
+        if parsed.strftime("%Y-%m-%d %H:%M:%S") != generated:
+            return None
+        return parsed.strftime("%Y%m%d-%H%M%S")
+    except (TypeError, ValueError):
+        return None
+
+
+def _unique_scan_id(base):
+    """A second scan in the same second must not replace the first result."""
+    base = _validate_scan_id(base)[:15]
+    stamp, suffix = base, 0
+    while os.path.lexists(scan_path(stamp)):
+        suffix += 1
+        stamp = "%s-%03d" % (base, suffix)
+    return stamp
+
+
+def _is_scan(payload):
+    return (isinstance(payload, dict) and isinstance(payload.get("rows"), list)
+            and all(isinstance(row, dict) for row in payload["rows"]))
+
+
+def _snapshot_names():
+    try:
+        with os.scandir(SCAN_DIR) as entries:
+            names = []
+            for entry in entries:
+                if not entry.name.endswith(".json") or not entry.is_file(follow_symlinks=False):
+                    continue
+                stamp = entry.name[:-5]
+                try:
+                    _validate_scan_id(stamp)
+                except InputError:
+                    continue
+                names.append(stamp)
+            return names
+    except FileNotFoundError:
+        return []
+
+
+def _snapshot(stamp):
+    path = scan_path(stamp)
+    if os.path.islink(path) or not os.path.isfile(path):
+        return None
+    payload = read_json(path)
+    return dict(payload, scan_id=stamp) if _is_scan(payload) else None
+
+
+def _historical_latest(require_archive=False):
+    """Keep a legacy/orphan latest readable and archive it before it is replaced."""
+    payload = read_json(scan_path())
+    if not _is_scan(payload):
+        return None
+    stamp = payload.get("scan_id")
+    try:
+        _validate_scan_id(stamp)
+    except InputError:
+        stamp = _generated_stamp(payload.get("generated"))
+        if stamp is None:
+            stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(os.path.getmtime(scan_path())))
+    existing = _snapshot(stamp)
+    expected = dict(payload, scan_id=stamp)
+    if existing == expected:
+        return expected
+    # Legacy latest has no stored ID; find a prior migration of a same-second conflict.
+    for candidate in sorted(_snapshot_names(), key=_scan_order, reverse=True):
+        if candidate[:15] == stamp[:15]:
+            expected = dict(payload, scan_id=candidate)
+            if _snapshot(candidate) == expected:
+                return expected
+    stamp = _unique_scan_id(stamp)
+    archived = dict(payload, scan_id=stamp)
+    try:
+        write_json(scan_path(stamp), archived)
+    except OSError:
+        # A full/read-only disk must not make the last published result disappear.
+        LOG.warning("归档已有扫描失败，保留 latest 读取兼容", exc_info=True)
+        if require_archive:
+            raise
+    return archived
+
+
+def save_scan(payload, keep_snapshots=None):
+    """保存独立历史记录后发布 latest；默认长期保留，可显式限制历史数量。"""
+    if keep_snapshots is not None and (isinstance(keep_snapshots, bool)
+                                      or not isinstance(keep_snapshots, int) or keep_snapshots < 1):
+        raise InputError("保留的扫描记录数量必须是正整数")
+    if not _is_scan(payload):
+        raise InputError("扫描结果缺少有效的个股列表")
+    base = _generated_stamp(payload.get("generated"))
+    if base is None:
+        if payload.get("generated"):
+            raise InputError("扫描生成时间格式无效")
+        base = time.strftime("%Y%m%d-%H%M%S")
+    with _SCAN_LOCK:
+        _historical_latest(require_archive=True)
+        stamp = _unique_scan_id(base)
+        saved = dict(payload, scan_id=stamp)
+        snapshot_path = scan_path(stamp)
+        write_json(snapshot_path, saved)
+        # Publish last: failure to create a snapshot must preserve the prior result.
+        try:
+            write_json(scan_path(), saved)
+        except Exception:
+            # The ID belongs only to this attempted save; no previous history is removed.
+            try:
+                os.unlink(snapshot_path)
+            except OSError:
+                LOG.warning("发布失败后清理本次扫描快照失败: %s", snapshot_path, exc_info=True)
+            raise
+        payload["scan_id"] = stamp
+        if keep_snapshots is None:
+            return
         try:
             _prune_snapshots(keep_snapshots)
         except OSError:
@@ -135,17 +262,85 @@ def save_scan(payload, keep_snapshots=8):
 
 
 def _prune_snapshots(keep_snapshots):
-    snaps = sorted(f for f in os.listdir(SCAN_DIR)
-                   if f.endswith(".json") and f not in ("latest.json", "attempt.json"))
+    snaps = sorted(_snapshot_names(), key=_scan_order)
     for old in snaps[:-keep_snapshots]:
         try:
-            os.remove(os.path.join(SCAN_DIR, old))
+            os.remove(scan_path(old))
         except OSError:
             LOG.warning("清理旧快照失败: %s", old, exc_info=True)
 
 
-def load_scan():
-    return read_json(scan_path())
+def _scan_order(stamp):
+    return stamp[:15], int(stamp[16:]) if len(stamp) > 15 else 0
+
+
+def load_scan(stamp=None):
+    """读取最新或指定的历史扫描；未知记录为 None，非法 ID 抛 InputError。"""
+    if stamp is not None:
+        _validate_scan_id(stamp)
+    with _SCAN_LOCK:
+        if stamp is not None:
+            saved = _snapshot(stamp)
+            if saved is not None:
+                return saved
+        latest = _historical_latest()
+        if stamp is None or (latest is not None and latest["scan_id"] == stamp):
+            return latest
+        return None
+
+
+def list_scans():
+    """按执行时间倒序列出成功保存的扫描，不包含失败诊断和损坏文件。"""
+    global _SCAN_METADATA_DIRECTORY
+    with _SCAN_LOCK:
+        directory = os.path.abspath(SCAN_DIR)
+        if directory != _SCAN_METADATA_DIRECTORY:
+            _SCAN_METADATA_CACHE.clear()
+            _SCAN_METADATA_DIRECTORY = directory
+        latest = _historical_latest()
+        stamps = _snapshot_names()
+        present = {os.path.abspath(scan_path(stamp)) for stamp in stamps}
+        for removed in set(_SCAN_METADATA_CACHE) - present:
+            del _SCAN_METADATA_CACHE[removed]
+        scans = {}
+        for stamp in stamps:
+            metadata = _snapshot_metadata(stamp)
+            if metadata is not None:
+                scans[stamp] = metadata
+        if latest is not None:
+            scans[latest["scan_id"]] = _scan_metadata(latest["scan_id"], latest)
+        return [scans[stamp] for stamp in sorted(scans, key=_scan_order, reverse=True)]
+
+
+def _snapshot_metadata(stamp):
+    """Cache small summaries only; archive rows never remain in the catalog cache."""
+    path = os.path.abspath(scan_path(stamp))
+    try:
+        info = os.stat(path, follow_symlinks=False)
+    except OSError:
+        _SCAN_METADATA_CACHE.pop(path, None)
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        _SCAN_METADATA_CACHE.pop(path, None)
+        return None
+    version = (info.st_mtime_ns, info.st_size, info.st_ctime_ns, info.st_ino)
+    cached = _SCAN_METADATA_CACHE.get(path)
+    if cached is not None and cached[0] == version:
+        return dict(cached[1]) if cached[1] is not None else None
+    payload = _snapshot(stamp)
+    metadata = _scan_metadata(stamp, payload) if payload is not None else None
+    # Negative entries prevent repeatedly parsing an unchanged broken file.
+    _SCAN_METADATA_CACHE[path] = (version, metadata)
+    return dict(metadata) if metadata is not None else None
+
+
+def _scan_metadata(stamp, payload):
+    generated = payload.get("generated")
+    if _generated_stamp(generated) is None:
+        generated = datetime.strptime(stamp[:15], "%Y%m%d-%H%M%S").strftime("%Y-%m-%d %H:%M:%S")
+    return {"id": stamp, "generated": generated, "date": generated[:10],
+            "freq": payload.get("freq", "day"), "hit": payload.get("hit", len(payload["rows"])),
+            "total_scanned": payload.get("total_scanned", 0)}
 
 
 def save_scan_attempt(payload):

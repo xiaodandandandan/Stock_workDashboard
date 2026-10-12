@@ -15,12 +15,14 @@
 """
 import json
 import logging
+import math
 import re
 import ssl
 import time
 import urllib.error
 import urllib.request
 from urllib.parse import urlencode
+from datetime import datetime
 
 from . import SKILLS  # noqa: F401  （保持包初始化顺序：技能路径先注入）
 from .validation import InputError, integer, market_prefix, to_symbol
@@ -214,3 +216,74 @@ def quote_name(code):
     except Exception:                                           # noqa: BLE001
         LOG.warning("名称查询失败: %s", code, exc_info=True)
         return ""
+
+
+def quote_prices(symbols):
+    """腾讯当前报价，100 个一批、最多 4 个批次并发；错误按标的返回。
+
+    不回填 0 或日 K 缓存。变量名、交易所编号、代码与报价时间均须对应请求，
+    防止同一纯代码在不同交易所之间串用。price/date 是提供方的现价与行情时间。
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    if isinstance(symbols, (str, bytes)):
+        raise InputError("报价代码需为交易所标识数组")
+    requested, unique = [], set()
+    for raw in symbols:
+        symbol = str(raw).strip().lower()
+        if not re.fullmatch(r"(?:sh|sz|bj)[0-9]{6}", symbol):
+            raise InputError("报价代码需为 sh/sz/bj + 6 位数字")
+        if symbol not in unique:
+            requested.append(symbol)
+            unique.add(symbol)
+    if not requested:
+        return {"quotes": {}, "errors": {}}
+
+    exchange_ids = {"sh": "1", "sz": "51", "bj": "62"}
+
+    def batch(group):
+        quotes, errors, seen = {}, {}, set()
+        try:
+            txt = _get("https://qt.gtimg.cn/q=" + ",".join(group), HDR_TX, "gbk", 10)
+            if not isinstance(txt, str):
+                raise ValueError("报价响应不是文本")
+        except Exception as exc:
+            LOG.warning("当前报价批次获取失败", exc_info=True)
+            return {}, {symbol: "%s: %s" % (type(exc).__name__, exc) for symbol in group}
+        wanted = set(group)
+        for line in txt.splitlines():
+            match = re.fullmatch(r'\s*v_((?:sh|sz|bj)[0-9]{6})="([^"\r\n]*)";\s*', line)
+            if not match or match[1] not in wanted:
+                continue
+            symbol = match[1]
+            if symbol in seen:
+                quotes.pop(symbol, None)
+                errors[symbol] = "报价响应包含重复标的"
+                continue
+            seen.add(symbol)
+            fields = match[2].split("~")
+            try:
+                if (len(fields) <= 30 or fields[0] != exchange_ids[symbol[:2]]
+                        or fields[2] != symbol[2:]):
+                    raise ValueError("报价交易所或代码不一致")
+                price = float(fields[3])
+                if not math.isfinite(price) or price <= 0:
+                    raise ValueError("报价价格无效")
+                if not re.fullmatch(r"[0-9]{14}", fields[30]):
+                    raise ValueError("报价时间格式无效")
+                date = datetime.strptime(fields[30], "%Y%m%d%H%M%S")
+                quotes[symbol] = {"price": price, "date": date.strftime("%Y-%m-%d %H:%M:%S")}
+            except (TypeError, ValueError) as exc:
+                errors[symbol] = str(exc)
+        for symbol in group:
+            if symbol not in quotes and symbol not in errors:
+                errors[symbol] = "当前报价缺失"
+        return quotes, errors
+
+    groups = [requested[i:i + 100] for i in range(0, len(requested), 100)]
+    quotes, errors = {}, {}
+    with ThreadPoolExecutor(max_workers=min(4, len(groups))) as executor:
+        for group_quotes, group_errors in executor.map(batch, groups):
+            quotes.update(group_quotes)
+            errors.update(group_errors)
+    return {"quotes": quotes, "errors": errors}

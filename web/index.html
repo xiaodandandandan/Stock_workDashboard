@@ -20,6 +20,22 @@
     </div>
   </header>
 
+  <div class="panel history-panel">
+    <div class="row">
+      <div class="fld">
+        <label for="scanDate">扫描日期</label>
+        <select id="scanDate"><option value="">最新扫描</option></select>
+      </div>
+      <div class="fld" id="scanRunField" hidden>
+        <label for="scanRun">扫描批次</label>
+        <select id="scanRun"></select>
+      </div>
+      <button class="btn" id="btnQuotes">刷新行情</button>
+      <span class="hint" id="quoteSt" role="status" aria-live="polite"></span>
+    </div>
+    <div class="hint">涨跌值 / 涨跌幅 = 最新报价相对当次扫描价的变化；不含分红及除权调整。历史信号保持当时状态，打开个股查看最新 K 线。</div>
+  </div>
+
   <div class="stats" id="stats"></div>
 
   <div class="panel">
@@ -63,7 +79,7 @@
         <label for="q">搜索</label>
         <input type="text" id="q" placeholder="代码 / 名称" style="width:130px">
       </div>
-      <label class="chk"><input type="checkbox" id="validOnly" checked>仅未失效</label>
+      <label class="chk"><input type="checkbox" id="validOnly" checked>扫描时未失效</label>
       <label class="chk"><input type="checkbox" id="exclST" checked>排除 ST</label>
       <label class="chk"><input type="checkbox" id="exclBJ">排除北交所</label>
       <label class="chk"><input type="checkbox" id="trendOnly">仅趋势背驰</label>
@@ -83,7 +99,11 @@
           <th class="sortable" data-s="d">信号日</th>
           <th class="sortable" data-s="fr">新鲜度</th>
           <th class="num sortable" data-s="st">关键位</th>
-          <th class="num sortable" data-s="p">现价</th>
+          <th class="num sortable" data-s="p">扫描价</th>
+          <th class="num sortable" data-s="lp">最新价</th>
+          <th class="num sortable" data-s="chg">涨跌值</th>
+          <th class="num sortable" data-s="pct">涨跌幅</th>
+          <th>买点跟踪</th>
           <th class="num sortable" data-s="a">估算成交额(亿)</th>
         </tr></thead>
         <tbody id="tb"></tbody>
