@@ -18,12 +18,15 @@
  */
 const Zoom = (() => {
   const MIN_BARS = 24;        // 最少可见根数：再少就只剩几根柱子，笔和中枢无从谈起
+  const INITIAL_BARS = 120;
   const SCALE = 1.35;         // 每档缩放倍率
   const PRESETS = [250, 120, 60];
 
   let S = null;               // 视图状态，见 open()
   let cv = null, tipApi = null, bound = false, raf = 0;
   const historyGate = new RequestGate();
+  const pts = new Map();
+  let drag = null, pinch = null;
 
   const el = id => document.getElementById(id);
   const isOn = () => el('zoom').classList.contains('on');
@@ -39,6 +42,21 @@ const Zoom = (() => {
   /* ---------------- 窗口 ---------------- */
   const NB = () => S.fd.n;                 // pack 里一共有多少根
   const LEN = () => S.b - S.a;             // 当前显示多少根
+
+  function updateCursor() {
+    if (!cv) return;
+    cv.style.cursor = !S || LEN() === NB() ? 'crosshair' : (pts.size ? 'grabbing' : 'grab');
+  }
+  function resetGesture() {
+    const captured = [...pts.keys()];
+    pts.clear();
+    drag = pinch = null;
+    if (raf) { cancelAnimationFrame(raf); raf = 0; }
+    for (const id of captured) {
+      try { if (cv?.hasPointerCapture(id)) cv.releasePointerCapture(id); } catch (err) { /* already released */ }
+    }
+    updateCursor();
+  }
 
   function clampLen(len) {
     const n = NB();
@@ -59,6 +77,10 @@ const Zoom = (() => {
   }
   // 贴右边缘（最新）取 len 根
   const latest = len => setWin(NB() - clampLen(len), len);
+  function resetWindow() {
+    resetGesture();
+    latest(Math.min(INITIAL_BARS, NB()));
+  }
 
   /* ---------------- 切片 ---------------- */
   function slice(a, b) {
@@ -113,6 +135,9 @@ const Zoom = (() => {
     const n = NB(), len = LEN();
     el('zmRange').textContent =
       `显示 ${len} / ${n} 根　${ts(S.fdates[S.base + S.a])} ~ ${ts(S.fdates[S.base + S.b - 1])}`;
+    el('zmRange').title = len < n ? '向右拖动查看更早 K 线，向左拖动返回较新 K 线' :
+      '当前显示全部 K 线；点击“＋ 放大”或选择较短区间后即可拖动';
+    updateCursor();
     el('zmIn').disabled = len <= Math.min(MIN_BARS, n);
     el('zmOut').disabled = len >= n;
     el('zmPresets').querySelectorAll('button').forEach(b => {
@@ -147,11 +172,12 @@ const Zoom = (() => {
   function open() {
     const snap = Drawer.snapshot && Drawer.snapshot();
     if (!snap || !snap.d) return;
+    resetGesture();
     historyGate.cancel();
     S = { code: snap.symbol || snap.code, name: snap.name, freq: snap.freq, avail: snap.bars || 0,
           fd: snap.d, fdates: snap.dates, fopt: snap.opt || {}, fhist: snap.hist || [], base: 0 };
     S.base = baseOf(S.fd, S.fdates);
-    setWin(0, S.fd.n);
+    resetWindow();
 
     el('zmTitle').textContent = (snap.name || snap.code) + ' · ' + (snap.unit || '');
     const more = S.avail > S.fd.n;
@@ -168,16 +194,18 @@ const Zoom = (() => {
       const sl = slice(S.a, S.b);
       tipApi = bindTip(cv, sl.d, S.fdates, sl.hist, el('zmTip'));
       // bindTip 默认把 touch-action 设成 pan-y（给页面留翻页）；放大视图要吃掉纵向手势做平移
-      cv.style.touchAction = 'none';
     }
+    cv.style.touchAction = 'none';
   }
 
   function close() {
     historyGate.cancel();
+    resetGesture();
     el('zoom').classList.remove('on');
     el('zoom').setAttribute('aria-hidden', 'true');
     if (tipApi && tipApi.hide) tipApi.hide();
     S = null;
+    updateCursor();
   }
 
   // d0 → 在全量 dates 里的下标。★ 严格比较必须转字符串（历史坑，见 kline_canvas.dateStart）
@@ -198,13 +226,16 @@ const Zoom = (() => {
       const p = await API.stock(view.code, view.freq, { lookback: view.avail }, ticket.signal);
       if (!historyGate.isCurrent(ticket) || S !== view) return;
       if (!p || !p.chart || !p.chart.pack) throw new Error('返回数据不完整');
+      const firstDate = String(S.fdates[S.base + S.a]), visible = LEN();
+      resetGesture();
       S.fd = p.chart.pack;
       S.fdates = p.chart.dates;
       S.fopt = p.chart.opt || {};
       S.fhist = p.chart.hist || [];
       S.base = baseOf(S.fd, S.fdates);
       S.avail = p.bars || S.fd.n;
-      setWin(0, S.fd.n);
+      const first = S.fdates.findIndex(date => String(date) === firstDate) - S.base;
+      if (first >= 0) setWin(first, visible); else latest(visible);
       btn.style.display = 'none';
       buildPresets();
       render();
@@ -229,7 +260,7 @@ const Zoom = (() => {
     el('zoom').addEventListener('click', e => { if (e.target === el('zoom')) close(); });
     el('zmIn').addEventListener('click', () => { zoomAround((S.a + S.b) / 2, LEN() / SCALE); render(); });
     el('zmOut').addEventListener('click', () => { zoomAround((S.a + S.b) / 2, LEN() * SCALE); render(); });
-    el('zmReset').addEventListener('click', () => { setWin(0, NB()); render(); });
+    el('zmReset').addEventListener('click', () => { resetWindow(); render(); });
     el('zmLast').addEventListener('click', () => { latest(LEN()); render(); });
     el('zmMore').addEventListener('click', loadMore);
 
@@ -261,9 +292,6 @@ const Zoom = (() => {
     }, { passive: false });
 
     // 拖动平移 / 双指缩放。用 Pointer Events 一套吃鼠标 + 触摸 + 触控笔
-    const pts = new Map();
-    let drag = null, pinch = null;
-
     const pinchStart = () => {
       const p = [...pts.values()];
       const d = Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y) || 1;
@@ -280,6 +308,7 @@ const Zoom = (() => {
 
     cv.addEventListener('pointerdown', e => {
       if (!isOn() || !S) return;
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
       // ★ try 一下：指针在事件到达前已经抬起（或合成事件没有活跃指针）时，
       //   setPointerCapture 会抛 NotFoundError，整段平移就哑了 —— 抓不到就算了，
       //   后面的 pointermove 照样能收到。
@@ -287,6 +316,7 @@ const Zoom = (() => {
       pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
       if (pts.size === 1) { drag = { x: e.clientX, a: S.a, len: LEN() }; pinch = null; }
       else if (pts.size === 2) { pinch = pinchStart(); drag = null; }
+      updateCursor();
     });
 
     cv.addEventListener('pointermove', e => {
@@ -300,17 +330,24 @@ const Zoom = (() => {
     });
 
     const endPointer = e => {
+      if (!pts.has(e.pointerId)) return;
       pts.delete(e.pointerId);
-      if (pts.size < 2) pinch = null;
-      if (pts.size === 0) drag = null;
+      if (!S || pts.size === 0) { drag = pinch = null; }
+      else if (pts.size === 1) {
+        const remaining = [...pts.values()][0];
+        drag = { x: remaining.x, a: S.a, len: LEN() };
+        pinch = null;
+      } else { pinch = pinchStart(); drag = null; }
+      updateCursor();
     };
     cv.addEventListener('pointerup', endPointer);
     cv.addEventListener('pointercancel', endPointer);
+    cv.addEventListener('lostpointercapture', endPointer);
 
     // 双击：以点击处为中心放大一倍；已经放到最小了就复位 —— 一个手势覆盖「放大 / 退回」
     cv.addEventListener('dblclick', e => {
       if (!S) return;
-      if (LEN() <= Math.min(MIN_BARS, NB())) setWin(0, NB());
+      if (LEN() <= Math.min(MIN_BARS, NB())) resetWindow();
       else zoomAround(idxAt(e.clientX), LEN() / 2);
       render();
     });
@@ -321,7 +358,7 @@ const Zoom = (() => {
       if (e.key === 'Escape') close();
       else if (e.key === '+' || e.key === '=') { zoomAround(mid, LEN() / SCALE); render(); }
       else if (e.key === '-' || e.key === '_') { zoomAround(mid, LEN() * SCALE); render(); }
-      else if (e.key === '0') { setWin(0, NB()); render(); }
+      else if (e.key === '0') { resetWindow(); render(); }
       else if (e.key === 'ArrowLeft') { setWin(S.a - Math.max(1, LEN() * 0.2), LEN()); render(); }
       else if (e.key === 'ArrowRight') { setWin(S.a + Math.max(1, LEN() * 0.2), LEN()); render(); }
       else return;

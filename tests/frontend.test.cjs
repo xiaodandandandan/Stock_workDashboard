@@ -21,18 +21,22 @@ function payload(symbol = 'sh600000', freq = 'day', n = 150, close = 1000) {
 }
 
 function environment() {
-  const elements = new Map(), pending = [];
-  let lastDraw = null;
+  const elements = new Map(), pending = [], frames = new Map();
+  let lastDraw = null, nextFrame = 1;
   class Element {
     constructor(id) {
       this.id = id; this.style = {}; this.events = {}; this.dataset = {}; this.disabled = false;
       this.textContent = ''; this.innerHTML = ''; this.clientHeight = 600; this.open = false;
+      this.capturedPointers = new Set();
       const classes = new Set();
       this.classList = { add: x => classes.add(x), remove: x => classes.delete(x),
         contains: x => classes.has(x), toggle: (x, on) => on ? classes.add(x) : classes.delete(x) };
       this.parentNode = { replaceChild: n => elements.set(n.id, n) };
     }
     addEventListener(name, fn) { this.events[name] = fn; }
+    setPointerCapture(id) { this.capturedPointers.add(id); }
+    releasePointerCapture(id) { this.capturedPointers.delete(id); }
+    hasPointerCapture(id) { return this.capturedPointers.has(id); }
     setAttribute() {}
     querySelectorAll() { return []; }
     appendChild(n) { elements.set(n.id, n); }
@@ -48,14 +52,40 @@ function environment() {
     API: { stock: (code, freq, opts, signal) => new Promise((resolve, reject) => pending.push({ code, freq, opts, signal, resolve, reject })) },
     esc: String, fmtDate: String, setupCanvas: () => ({}), draw: (_ctx, d) => { lastDraw = d; },
     bindTip: () => ({ update() {}, hide() {} }),
-    requestAnimationFrame: fn => { fn(); return 1; }, layout: () => ({ PL: 52, bw: 10 }),
+    requestAnimationFrame: fn => { const id = nextFrame++; frames.set(id, fn); return id; },
+    cancelAnimationFrame: id => frames.delete(id), layout: () => ({ PL: 52, bw: 10 }),
   });
   for (const file of ['state.js', 'drawer.js', 'zoom.js']) vm.runInContext(read('js/' + file), ctx, { filename: file });
   return {
     ctx, el, pending, Drawer: vm.runInContext('Drawer', ctx), Zoom: vm.runInContext('Zoom', ctx),
     draw: () => lastDraw,
+    pendingFrames: () => frames.size,
+    flushFrames: () => {
+      const batch = [...frames.values()]; frames.clear();
+      for (const fn of batch) fn(0);
+    },
+    pointer: (name, values = {}) => el('zmcv').events[name]?.({
+      pointerId: 1, pointerType: 'mouse', button: 0, buttons: name === 'pointerup' ? 0 : 1,
+      clientX: 500, clientY: 200, preventDefault() {}, ...values,
+    }),
     switchFreq: freq => el('dwFreq').events.click({ target: { closest: () => ({ dataset: { freq } }) } }),
   };
+}
+
+async function openZoom(data = payload()) {
+  const e = environment();
+  e.Drawer.open({ code: data.code, symbol: data.symbol });
+  e.pending.shift().resolve(data); await tick();
+  e.Zoom.open();
+  return e;
+}
+
+function extendedHistory(data, n = 300) {
+  const longer = payload(data.symbol, data.freq, n, data.chart.pack.c[0]);
+  const start = Number(data.chart.dates[0]) - (n - data.chart.dates.length);
+  longer.chart.dates = Array.from({ length: n }, (_, i) => String(start + i));
+  longer.chart.pack.d0 = longer.chart.dates[0];
+  return longer;
 }
 
 test('cached day selection invalidates a pending minute response', async () => {
@@ -143,13 +173,146 @@ test('long-history response for A cannot overwrite newly opened B', async () => 
   assert.equal(e.el('zmMore').style.display, '');
 });
 
-test('same-stock long-history request updates normally', async () => {
-  const e = environment();
-  e.Drawer.open({ code: '600000' }); e.pending.shift().resolve(payload()); await tick();
-  e.Zoom.open(); const done = e.el('zmMore').events.click();
-  e.pending.shift().resolve(payload('sh600000', 'day', 300)); await done;
-  assert.equal(e.draw().n, 300);
+test('longer history preserves the current visible length and starting date', async () => {
+  const data = payload(), e = await openZoom(data);
+  e.pointer('pointerdown'); e.pointer('pointermove', { clientX: 550 }); e.flushFrames();
+  e.pointer('pointerup', { clientX: 550 });
+  const start = e.draw().d0;
+  const done = e.el('zmMore').events.click();
+  e.pending.shift().resolve(extendedHistory(data)); await done;
+  assert.equal(e.draw().n, 120);
+  assert.equal(e.draw().d0, start);
+  assert.match(e.el('zmRange').textContent, /120 \/ 300/);
   assert.equal(e.el('zmMore').style.display, 'none');
+});
+
+test('longer history without the old starting date keeps the visible length at the latest bars', async () => {
+  const e = await openZoom();
+  const done = e.el('zmMore').events.click();
+  const longer = payload('sh600000', 'day', 300);
+  longer.chart.dates = Array.from({ length: 300 }, (_, i) => String(20300000 + i));
+  longer.chart.pack.d0 = longer.chart.dates[0];
+  e.pending.shift().resolve(longer); await done;
+  assert.equal(e.draw().n, 120);
+  assert.equal(e.draw().d0, longer.chart.dates[180]);
+});
+
+test('zoom opens at the latest 120 bars and shorter data stays within its available range', async () => {
+  const data = payload(), e = await openZoom(data);
+  assert.equal(e.draw().n, 120);
+  assert.equal(e.draw().d0, data.chart.dates[30]);
+  assert.match(e.el('zmRange').textContent, /120 \/ 150/);
+  assert.equal(e.el('zmcv').style.cursor, 'grab');
+  const short = payload('sh600000', 'day', 80), small = await openZoom(short);
+  assert.equal(small.draw().n, 80);
+  assert.equal(small.draw().d0, short.chart.dates[0]);
+  assert.match(small.el('zmRange').textContent, /80 \/ 80/);
+});
+
+test('reset returns to the initial latest window so panning remains available', async () => {
+  const data = payload(), e = await openZoom(data);
+  e.el('zmPresets').events.click({ target: { closest: () => ({ dataset: { len: '0' } }) } });
+  assert.equal(e.draw().n, 150);
+  e.el('zmReset').events.click();
+  assert.equal(e.draw().n, 120);
+  assert.equal(e.draw().d0, data.chart.dates[30]);
+  e.pointer('pointerdown'); e.pointer('pointermove', { clientX: 550 }); e.flushFrames();
+  assert.equal(e.draw().d0, data.chart.dates[25]);
+});
+
+test('dragging repaints successive animation frames and coalesces pointer movements within one frame', async () => {
+  const e = await openZoom(), cv = e.el('zmcv');
+  const start = e.draw().d0;
+  e.pointer('pointerdown');
+  assert.equal(cv.hasPointerCapture(1), true);
+  assert.equal(cv.style.cursor, 'grabbing');
+  e.pointer('pointermove', { clientX: 520 });
+  e.pointer('pointermove', { clientX: 550 });
+  assert.equal(e.pendingFrames(), 1);
+  assert.equal(e.draw().d0, start);
+  e.flushFrames();
+  const first = e.draw().d0;
+  assert.equal(first, String(Number(start) - 5));
+  e.pointer('pointermove', { clientX: 600 });
+  assert.equal(e.pendingFrames(), 1);
+  e.flushFrames();
+  assert.equal(e.draw().d0, String(Number(start) - 10));
+  assert.notEqual(e.draw().d0, first);
+  e.pointer('pointerup', { clientX: 600 });
+  assert.equal(cv.style.cursor, 'grab');
+});
+
+test('closing and reopening zoom clears old touch pointers and cancels pending frames', async () => {
+  const e = await openZoom();
+  e.pointer('pointerdown', { pointerType: 'touch', pointerId: 11 });
+  e.pointer('pointermove', { pointerType: 'touch', pointerId: 11, clientX: 550 });
+  assert.equal(e.pendingFrames(), 1);
+  e.Zoom.close();
+  assert.equal(e.pendingFrames(), 0);
+  e.Zoom.open();
+  const start = e.draw().d0;
+  e.pointer('pointerdown', { pointerType: 'touch', pointerId: 12 });
+  e.pointer('pointermove', { pointerType: 'touch', pointerId: 12, clientX: 550 });
+  e.flushFrames();
+  assert.equal(e.draw().n, 120);
+  assert.equal(e.draw().d0, String(Number(start) - 5));
+});
+
+test('lost pointer capture ends the old drag so the next drag continues normally', async () => {
+  const e = await openZoom(), cv = e.el('zmcv');
+  e.pointer('pointerdown'); e.pointer('pointermove', { clientX: 550 }); e.flushFrames();
+  const first = e.draw().d0;
+  cv.releasePointerCapture(1);
+  e.pointer('lostpointercapture', { buttons: 0 });
+  assert.equal(cv.style.cursor, 'grab');
+  e.pointer('pointermove', { clientX: 700, buttons: 0 });
+  assert.equal(e.pendingFrames(), 0);
+  e.pointer('pointerdown'); e.pointer('pointermove', { clientX: 550 }); e.flushFrames();
+  assert.equal(e.draw().d0, String(Number(first) - 5));
+});
+
+test('one remaining finger can pan immediately after a two-finger pinch ends', async () => {
+  const e = await openZoom();
+  e.pointer('pointerdown', { pointerType: 'touch', pointerId: 10, clientX: 500 });
+  e.pointer('pointerdown', { pointerType: 'touch', pointerId: 20, clientX: 600 });
+  e.pointer('pointermove', { pointerType: 'touch', pointerId: 20, clientX: 620 }); e.flushFrames();
+  const pinchedStart = e.draw().d0, length = e.draw().n;
+  assert.equal(length, 100);
+  e.pointer('pointerup', { pointerType: 'touch', pointerId: 20, clientX: 620 });
+  e.pointer('pointermove', { pointerType: 'touch', pointerId: 10, clientX: 550 }); e.flushFrames();
+  assert.equal(e.draw().n, length);
+  assert.equal(e.draw().d0, String(Number(pinchedStart) - 5));
+});
+
+test('right-button presses do not begin chart dragging', async () => {
+  const e = await openZoom(), start = e.draw().d0;
+  e.pointer('pointerdown', { button: 2, buttons: 2 });
+  e.pointer('pointermove', { clientX: 550, buttons: 2 });
+  assert.equal(e.pendingFrames(), 0);
+  assert.equal(e.draw().d0, start);
+  assert.equal(e.el('zmcv').hasPointerCapture(1), false);
+});
+
+test('all-bars mode cannot move outside its data and a shorter window clamps at both ends', async () => {
+  const data = payload(), e = await openZoom(data);
+  const preset = len => e.el('zmPresets').events.click({
+    target: { closest: () => ({ dataset: { len: String(len) } }) },
+  });
+  preset(0);
+  e.pointer('pointerdown');
+  e.pointer('pointermove', { clientX: 1500 }); e.flushFrames();
+  assert.equal(e.draw().n, 150);
+  assert.equal(e.draw().d0, data.chart.dates[0]);
+  e.pointer('pointermove', { clientX: -500 }); e.flushFrames();
+  assert.equal(e.draw().d0, data.chart.dates[0]);
+  e.pointer('pointerup');
+  preset(60);
+  e.pointer('pointerdown');
+  e.pointer('pointermove', { clientX: 1600 }); e.flushFrames();
+  assert.equal(e.draw().d0, data.chart.dates[0]);
+  e.pointer('pointermove', { clientX: -500 }); e.flushFrames();
+  assert.equal(e.draw().n, 60);
+  assert.equal(e.draw().d0, data.chart.dates[90]);
 });
 
 test('late report from the old frequency is not shown', async () => {
