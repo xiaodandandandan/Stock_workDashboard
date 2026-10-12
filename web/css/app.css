@@ -83,6 +83,7 @@ tr:hover .name .go{opacity:1}
 .scan-return-cell{width:166px;min-width:166px;white-space:nowrap}
 td.scan-return-cell{font-size:14px;font-weight:600}
 .tracking-cell{width:98px;max-width:98px;padding-left:5px;padding-right:5px;white-space:nowrap}
+.stock-table th,.stock-table td{text-align:center;vertical-align:middle}
 .tablewrap{max-height:640px;overflow:auto;border-radius:8px}
 .empty{padding:40px;text-align:center;color:var(--tx3)}
 footer{margin-top:18px;font-size:12px;color:var(--tx3);line-height:1.7}
