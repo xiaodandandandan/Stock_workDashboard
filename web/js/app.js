@@ -28,7 +28,12 @@ const S = {
   exclST: true, exclBJ: false, trendOnly: false, sort: 'a', dir: -1,
 };
 let snapshots = [], selectedDate = '', selectedSnapshot = '', loadedSnapshot = '';
-let scanLoading = false, quotes = {}, quoteTimer = null, lastTrackingKey = '';
+const TRACKING_TTL_MS = 60000, TRACKING_RETRY_MS = 15000, FOREGROUND_MIN_MS = 5000;
+let scanLoading = false, quotes = {}, quoteTimer = null, quotePollTimer = null;
+let lastTrackingKey = '', lastTrackingAt = 0, lastTrackingDelay = TRACKING_TTL_MS;
+let trackingRetryKey = '', trackingRetryAt = 0, trackingPending = null;
+let lastTrackingStatus = '', trackingRetryStatus = '';
+let quotePagePaused = false, foregroundPending = null, archivesPending = null, lastArchivesAt = 0;
 const scanGate = new RequestGate(), trackingGate = new RequestGate();
 
 const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g,
@@ -168,6 +173,9 @@ function trackingLabel(r, q) {
 
 function renderTable(list) {
   const tb = document.getElementById('tb');
+  const viewDate = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' });
+  document.getElementById('currentQuoteDay').textContent = '当前日期 ' + viewDate;
+  renderScanMeta();
   tb.innerHTML = list.slice(0, 800).map(r => {
     const hs = signals(r);
     const q = quoteFor(r);
@@ -183,16 +191,16 @@ function renderTable(list) {
     return `<tr class="rowhit" data-symbol="${esc(r.symbol || normalizeSymbol(r.code))}" title="点开看这只票的缠论结构">
       <td class="code">${esc(r.code)}</td>
       <td class="name">${esc(r.name)}<span class="go">展开 ↗</span></td>
-      <td><span class="ind">${esc(r.industry)}</span></td>
       <td>${tags}</td>
-      <td class="code">${hs.map(h => fmtDate(h.date)).join('<br>')}</td>
-      <td>${hs.map(h => fmtFresh(h.fresh)).join('<br>')}</td>
-      <td class="num">${hs.map(h => h.stop != null ? (+h.stop).toFixed(2) : '—').join('<br>')}</td>
       <td class="num">${r.close != null ? (+r.close).toFixed(2) : '—'}</td>
-      <td class="num" title="${esc(q?.date || '行情尚未获取')}">${q?.price != null ? (+q.price).toFixed(2) : '—'}<span class="quote-time">${esc(q?.date || '')}</span></td>
+      <td class="num current-price-cell" title="${esc('查看日期：' + viewDate + '；实际报价时间：' + (q?.date || '行情尚未获取'))}"><b>${q?.price != null ? (+q.price).toFixed(2) : '—'}</b><span class="quote-time">${esc(q?.date || '报价未获取')}</span></td>
       <td class="num" title="${esc('行情交易日：' + (q?.date?.slice(0, 10) || '未知') + '；昨收价：' + (q?.previous_close ?? '尚未获取'))}">${signedPrice(q?.daily_change)}</td>
       <td class="num daily-return-cell" title="${esc('以行情源昨收价 ' + (q?.previous_close ?? '未知') + ' 为基准；报价截至：' + (q?.date || '尚未获取'))}">${signedPrice(q?.daily_change_pct, true)}</td>
       <td class="num scan-return-cell" title="${esc('扫描基准：' + D.generated + '，价格 ' + r.close + '；报价截至：' + (q?.date || '尚未获取'))}">${signedPrice(scanReturn(q), true)}</td>
+      <td><span class="ind">${esc(r.industry)}</span></td>
+      <td class="code">${hs.map(h => fmtDate(h.date)).join('<br>')}</td>
+      <td>${hs.map(h => fmtFresh(h.fresh)).join('<br>')}</td>
+      <td class="num">${hs.map(h => h.stop != null ? (+h.stop).toFixed(2) : '—').join('<br>')}</td>
       <td class="tracking-cell">${trackingLabel(r, q)}</td>
       <td class="num">${(+r.amt).toFixed(2)}</td>
       <td class="fundamental-action"><button class="btn fundamental-btn" data-fundamental="${esc(r.symbol || normalizeSymbol(r.code))}" title="点击后获取该公司的基本面与最新动态">基本面</button></td>
@@ -220,8 +228,13 @@ function renderStats(t) {
        <div class="k">${k}<span style="opacity:.6"> · ${scope}</span></div>
        <div class="v ${c}">${v}</div>
      </div>`).join('');
+  renderScanMeta();
+}
+function renderScanMeta() {
+  const newer = snapshots[0]?.id && loadedSnapshot && snapshots[0].id !== loadedSnapshot;
+  const label = selectedDate ? '历史扫描' : newer ? '已加载扫描（另有新批次）' : '最新扫描';
   document.getElementById('sub').textContent =
-    `${selectedDate ? '历史扫描' : '最新扫描'} ${D.generated}　·　${D.freq || 'day'} ${D.count || 800} 根　·　扫描耗时 ${D.elapsed}s` +
+    `${label} ${D.generated}　·　${D.freq || 'day'} ${D.count || 800} 根　·　扫描耗时 ${D.elapsed}s` +
     (D.errors ? `　·　⚠ ${D.errors} 只分析失败，榜单不完整` : '') +
     (D.industry_status?.status === 'failed' ? '　·　⚠ 行业获取失败，请重新扫描' :
       (D.industry_status?.missing ? `　·　⚠ ${D.industry_status.missing} 只缺少行业分类` : '')) +
@@ -294,20 +307,32 @@ function renderArchiveOptions() {
     `<option value="${esc(x.id)}">${esc(x.generated.slice(11))} · ${esc(x.freq)} · ${x.hit} 只</option>`).join('');
   document.getElementById('scanRun').value = selectedSnapshot;
 }
-async function reloadArchives() {
-  try {
-    snapshots = (await API.scans()).snapshots;
-    renderArchiveOptions();
-  } catch (e) {
-    setScanSt('扫描历史读取失败：' + e.message, true);
-  }
+function reloadArchives() {
+  if (archivesPending) return archivesPending;
+  const pending = (async () => {
+    try {
+      snapshots = (await API.scans()).snapshots;
+      lastArchivesAt = Date.now();
+      renderArchiveOptions();
+      renderScanMeta();
+    } catch (e) {
+      setScanSt('扫描历史读取失败：' + e.message, true);
+    }
+  })();
+  archivesPending = pending;
+  pending.finally(() => { if (archivesPending === pending) archivesPending = null; });
+  return pending;
 }
 async function loadScan(snapshot = '') {
   const ticket = scanGate.begin();
   trackingGate.cancel();
-  clearTimeout(quoteTimer);
+  trackingPending = null;
+  clearTrackingTimers();
   scanLoading = true;
   lastTrackingKey = '';
+  lastTrackingAt = 0;
+  trackingRetryKey = '';
+  lastTrackingStatus = trackingRetryStatus = '';
   quotes = {};
   if (typeof Drawer !== 'undefined' && Drawer.openCode) Drawer.close();
   document.getElementById('tb').innerHTML = '';
@@ -335,51 +360,142 @@ async function loadScan(snapshot = '') {
     document.getElementById('sub').textContent = e.status === 404 && !snapshot ?
       '还没有扫描结果 —— 点右上角“重新扫描”' : '所选扫描未能读取';
     setScanSt(e.status === 404 && !snapshot ? '待扫描' : ('读取失败：' + e.message), true);
+    document.getElementById('btnQuotes').disabled = false;
     return false;
   }
 }
 function scheduleTracking() {
   clearTimeout(quoteTimer);
-  quoteTimer = setTimeout(() => updateTracking(), 200);
+  quoteTimer = null;
+  if (!trackingVisible()) return;
+  quoteTimer = setTimeout(() => { quoteTimer = null; updateTracking(); }, 200);
+}
+function trackingVisible() { return !quotePagePaused && document.visibilityState !== 'hidden'; }
+function clearTrackingTimers() {
+  clearTimeout(quoteTimer);
+  clearTimeout(quotePollTimer);
+  quoteTimer = quotePollTimer = null;
+}
+function armTrackingPoll(delay = lastTrackingDelay) {
+  clearTimeout(quotePollTimer);
+  quotePollTimer = null;
+  if (!trackingVisible() || scanLoading || trackingPending || !D.rows.length) return;
+  quotePollTimer = setTimeout(() => { quotePollTimer = null; pollTracking(); }, Math.max(1, delay));
+}
+function archivesExpired() {
+  const age = Date.now() - lastArchivesAt;
+  return !lastArchivesAt || age < 0 || age >= TRACKING_TTL_MS;
+}
+function newerScanAvailable() {
+  const newest = snapshots[0];
+  if (!newest || newest.id === loadedSnapshot) return false;
+  const current = snapshots.findIndex(scan => scan.id === loadedSnapshot);
+  if (current >= 0) return current > 0;
+  if (newest.generated !== D.generated) return newest.generated > D.generated;
+  const idPattern = /^[0-9]{8}-[0-9]{6}(?:-[0-9]{3,9})?$/;
+  return idPattern.test(newest.id) && idPattern.test(loadedSnapshot) &&
+    (newest.id.slice(0, 15) > loadedSnapshot.slice(0, 15) ||
+     (newest.id.slice(0, 15) === loadedSnapshot.slice(0, 15) && +newest.id.slice(16) > +loadedSnapshot.slice(16)));
+}
+async function followLatestScan() {
+  if (selectedDate || selectedSnapshot || scanLoading || !newerScanAvailable()) return;
+  // Preserve the immutable batch being read in an open stock view.
+  if ((typeof Drawer !== 'undefined' && Drawer.openCode) ||
+      (typeof Fundamentals !== 'undefined' && Fundamentals.isOpen?.())) return;
+  await loadScan('');
+}
+async function pollTracking() {
+  if (!trackingVisible()) return;
+  try {
+    if (archivesExpired()) await reloadArchives();
+    if (!trackingVisible()) return;
+    await followLatestScan();
+    if (trackingVisible()) await updateTracking();
+  } catch (e) { console.warn('行情自动刷新失败', e); armTrackingPoll(TRACKING_RETRY_MS); }
+}
+function foregroundTracking() {
+  if (!trackingVisible()) return;
+  if (foregroundPending) return foregroundPending;
+  const pending = (async () => {
+    if (archivesExpired()) await reloadArchives();
+    if (!trackingVisible()) return;
+    await followLatestScan();
+    if (trackingVisible()) await updateTracking(false, true);
+  })();
+  foregroundPending = pending;
+  pending.catch(e => { console.warn('前台行情刷新失败', e); armTrackingPoll(TRACKING_RETRY_MS); })
+    .finally(() => { if (foregroundPending === pending) foregroundPending = null; });
+  return pending;
 }
 function syncDrawerTracking() {
   if (typeof Drawer === 'undefined' || !Drawer.openCode || !Drawer.updateTracking) return;
   const symbol = normalizeSymbol(Drawer.openCode);
   Drawer.updateTracking(symbol, quotes[symbol], D.generated);
 }
-async function updateTracking(force = false) {
-  if (scanLoading) return;
+function updateTracking(force = false, foreground = false) {
+  if (scanLoading || (!force && !trackingVisible())) return;
   const data = D, snapshot = loadedSnapshot;
   const codes = sortedList().slice(0, 800).map(r => r.symbol || normalizeSymbol(r.code));
   const key = `${snapshot || D.generated}:${[...codes].sort().join(',')}`;
-  if (!force && key === lastTrackingKey) return;
-  lastTrackingKey = key;
-  const ticket = trackingGate.begin();
   const btn = document.getElementById('btnQuotes'), status = document.getElementById('quoteSt');
-  if (!codes.length) { btn.disabled = false; status.textContent = '当前列表没有需要跟踪的个股'; return; }
+  clearTrackingTimers();
+  if (!codes.length) {
+    trackingGate.cancel(); trackingPending = null;
+    lastTrackingKey = trackingRetryKey = '';
+    btn.disabled = false; status.textContent = '当前列表没有需要跟踪的个股'; return;
+  }
+  if (trackingPending?.key === key) return trackingPending.promise;
+  if (trackingPending) { trackingGate.cancel(); trackingPending = null; btn.disabled = false; }
+  const retrying = trackingRetryKey === key;
+  const completedAt = retrying ? trackingRetryAt : (lastTrackingKey === key ? lastTrackingAt : null);
+  const ttl = retrying ? TRACKING_RETRY_MS : lastTrackingDelay;
+  const age = completedAt === null ? Infinity : Date.now() - completedAt;
+  const sameDay = completedAt !== null && new Date(completedAt).toDateString() === new Date(Date.now()).toDateString();
+  if (!force && sameDay && age >= 0 && age < (foreground ? FOREGROUND_MIN_MS : ttl)) {
+    btn.disabled = false;
+    status.textContent = retrying ? trackingRetryStatus : lastTrackingStatus;
+    armTrackingPoll(ttl - age); return;
+  }
+  const ticket = trackingGate.begin();
+  const pending = { key, ticket, promise: null };
+  trackingPending = pending;
   btn.disabled = true;
   status.textContent = `正在更新 ${codes.length} 只个股的行情…`;
-  try {
-    const result = await API.tracking(snapshot, codes, force, ticket.signal);
-    if (!trackingGate.isCurrent(ticket) || D !== data) return;
-    quotes = { ...quotes, ...result.quotes };
-    renderTable(sortedList());
-    syncDrawerTracking();
-    const unavailable = Object.values(result.quotes).filter(q => q.status === 'unavailable').length;
-    const incomplete = Object.keys(result.errors || {}).length - unavailable;
-    status.textContent = `行情获取于 ${result.as_of} · 本页 ${codes.length} 只` +
-      (unavailable ? ` · ${unavailable} 只行情未获取（显示 —）` : '') +
-      (incomplete > 0 ? ` · ${incomplete} 只缺少涨跌基准，对应数值显示 —` : '') + ' · 每只报价时间见最新价';
-  } catch (e) {
-    if (!trackingGate.isCurrent(ticket) || D !== data) return;
-    lastTrackingKey = ''; // allow the next filter change to retry
-    quotes = {};
-    renderTable(sortedList());
-    syncDrawerTracking();
-    status.textContent = '行情更新失败：' + e.message + '，可点击“刷新行情”重试';
-  } finally {
-    if (trackingGate.isCurrent(ticket)) btn.disabled = false;
-  }
+  pending.promise = (async () => {
+    try {
+      const result = await API.tracking(snapshot, codes, force, ticket.signal);
+      if (!trackingGate.isCurrent(ticket) || D !== data) return;
+      const received = { ...result.quotes };
+      // Missing entries must erase this requested symbol's old price, not retain it as current.
+      for (const code of codes) if (!received[code]) received[code] = { price: null, date: null, status: 'unavailable' };
+      quotes = { ...quotes, ...received };
+      renderTable(sortedList());
+      syncDrawerTracking();
+      const unavailable = codes.filter(code => !result.quotes[code] || result.quotes[code].status === 'unavailable' ||
+        typeof result.quotes[code].price !== 'number' || !Number.isFinite(result.quotes[code].price) || result.quotes[code].price <= 0).length;
+      const incomplete = Math.max(0, Object.keys(result.errors || {}).length - unavailable);
+      lastTrackingKey = key; lastTrackingAt = Date.now(); trackingRetryKey = '';
+      lastTrackingDelay = unavailable || Object.keys(result.errors || {}).length ? TRACKING_RETRY_MS : TRACKING_TTL_MS;
+      status.textContent = `行情获取于 ${result.as_of} · 本页 ${codes.length} 只` +
+        (unavailable ? ` · ${unavailable} 只行情未获取（显示 —）` : '') +
+        (incomplete > 0 ? ` · ${incomplete} 只缺少涨跌基准，对应数值显示 —` : '') + ' · 每只报价时间见最新价';
+      lastTrackingStatus = status.textContent;
+    } catch (e) {
+      if (!trackingGate.isCurrent(ticket) || D !== data) return;
+      trackingRetryKey = key; trackingRetryAt = Date.now(); lastTrackingDelay = TRACKING_RETRY_MS;
+      quotes = {};
+      renderTable(sortedList());
+      syncDrawerTracking();
+      status.textContent = '行情更新失败：' + e.message + '，可点击“刷新行情”重试';
+      trackingRetryStatus = status.textContent;
+    } finally {
+      if (trackingPending === pending) {
+        trackingPending = null;
+        if (trackingGate.isCurrent(ticket)) { btn.disabled = false; armTrackingPoll(); }
+      }
+    }
+  })();
+  return pending.promise;
 }
 
 /* ---------------- 事件 ---------------- */
@@ -387,6 +503,14 @@ let bound = false;
 function bind() {
   if (bound) return;                 // boot() 可能被调用多次（扫描完刷新），事件只绑一次
   bound = true;
+  document.addEventListener('visibilitychange', () => {
+    if (!trackingVisible()) clearTrackingTimers();
+    else foregroundTracking();
+  });
+  window.addEventListener('focus', foregroundTracking);
+  window.addEventListener('online', foregroundTracking);
+  window.addEventListener('pagehide', () => { quotePagePaused = true; clearTrackingTimers(); });
+  window.addEventListener('pageshow', () => { quotePagePaused = false; foregroundTracking(); });
   document.getElementById('tabs').addEventListener('click', e => {
     const t = e.target.closest('.tab'); if (!t) return;
     S.tab = +t.dataset.i; refresh();
@@ -500,7 +624,7 @@ async function boot(silent) {
   if (silent) {
     await reloadArchives();
     // A background scan must not replace the historical batch being reviewed.
-    if (selectedDate) { await updateTracking(true); return; }
+    if (selectedDate) { await updateTracking(false, true); return; }
   }
   const ok = await loadScan(selectedSnapshot);
   // ★ bind() 无条件调用：首次使用时本来就没有扫描结果，如果这时不绑事件，

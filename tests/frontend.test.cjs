@@ -453,26 +453,51 @@ function scanFixture(id, price = 10) {
       buy: [{ type: '一类买点', date: '20261009', fresh: 0, valid: 1, stop: 9 }], sell: [] }] };
 }
 function appEnvironment() {
-  const elements = new Map(), scans = [], tracking = [];
+  const elements = new Map(), scans = [], tracking = [], catalog = [], timers = new Map(), windowEvents = {}, documentEvents = {};
+  const drawerUpdates = [];
+  let now = Date.parse('2026-10-14T00:00:00+08:00'), nextTimer = 1, fundamentalOpen = false;
   const el = id => {
     if (!elements.has(id)) elements.set(id, { innerHTML: '', textContent: '', style: {}, value: '',
       events: {}, classList: { toggle() {} }, addEventListener(name, fn) { this.events[name] = fn; } });
     return elements.get(id);
   };
+  const doc = { visibilityState: 'visible', getElementById: el, querySelectorAll: () => [],
+    addEventListener(name, fn) { documentEvents[name] = fn; } };
+  const drawer = { openCode: null, close() { this.openCode = null; },
+    updateTracking(symbol, quote, stamp) { drawerUpdates.push({ symbol, quote, stamp }); } };
   const ctx = vm.createContext({ console, AbortController, URLSearchParams, location: { search: '' },
-    setTimeout: () => 0, clearTimeout() {},
-    document: { getElementById: el, querySelectorAll: () => [] },
-    Drawer: { openCode: null, close() {} },
+    Date: class extends Date { constructor(...args) { super(...(args.length ? args : [now])); } static now() { return now; } },
+    setTimeout(fn, delay) { const id = nextTimer++; timers.set(id, { fn, at: now + delay }); return id; },
+    clearTimeout: id => timers.delete(id), document: doc,
+    window: { addEventListener(name, fn) { windowEvents[name] = fn; } },
+    Drawer: drawer, Fundamentals: { isOpen: () => fundamentalOpen },
     API: {
       scan: (id, signal) => new Promise(resolve => scans.push({ id, signal, resolve })),
-      scans: async () => ({ snapshots: [{ id: 'A', date: '2026-10-09', generated: '2026-10-09 15:00:00', hit: 1, freq: 'day' }] }),
+      scans: async () => { catalog.push(now); return { snapshots: ctx.catalogRows }; },
       scanStatus: async () => ({ running: false }),
-      tracking: (id, codes, force, signal) => new Promise(resolve => tracking.push({ id, codes, force, signal, resolve })),
+      tracking: (id, codes, force, signal) => new Promise((resolve, reject) => tracking.push({ id, codes, force, signal, resolve, reject })),
     },
   });
+  ctx.catalogRows = [{ id: 'A', date: '2026-10-09', generated: '2026-10-09 15:00:00', hit: 1, freq: 'day' }];
   vm.runInContext(read('js/state.js'), ctx);
   vm.runInContext(read('js/app.js'), ctx);
-  return { ctx, el, scans, tracking, run: code => vm.runInContext(code, ctx) };
+  return { ctx, el, scans, tracking, catalog, timers, drawerUpdates, drawer, run: code => vm.runInContext(code, ctx),
+    setNow(value) { now = value; }, now: () => now,
+    async advance(ms) {
+      const until = now + ms;
+      let count = 0;
+      while (true) {
+        const due = [...timers.entries()].filter(([, timer]) => timer.at <= until).sort((a, b) => a[1].at - b[1].at)[0];
+        if (!due) break;
+        assert.ok(++count < 1000, 'timers must not spin indefinitely');
+        const [id, timer] = due; timers.delete(id); now = Math.max(now, timer.at); timer.fn(); await tick();
+      }
+      now = until; await tick();
+    },
+    setHidden(hidden) { doc.visibilityState = hidden ? 'hidden' : 'visible'; return documentEvents.visibilitychange?.(); },
+    event(name) { return windowEvents[name]?.(); },
+    setFundamentalOpen(value) { fundamentalOpen = value; },
+  };
 }
 
 test('switching historical scans rejects a late earlier batch', async () => {
@@ -548,6 +573,208 @@ test('daily changes and cumulative returns render and sort with independent dire
   assert.equal(e.run('sortedList()[0].symbol'), 'sh600000');
   e.run("S.sort='chg'; S.dir=-1");
   assert.equal(e.run('sortedList()[0].symbol'), 'sz000001');
+});
+
+function freshTrackingResult(price = 12) {
+  return { quotes: { sh600000: { price, previous_close: 11, date: '2026-10-14 15:00:00',
+    daily_change: price - 11, daily_change_pct: (price / 11 - 1) * 100,
+    scan_change: price - 10, scan_change_pct: (price / 10 - 1) * 100,
+    status: 'ok', buy_stop_breached: false, breached_types: [] } }, errors: {}, as_of: '2026-10-14 15:00:00' };
+}
+async function trackedApp() {
+  const e = appEnvironment();
+  e.scans[0].resolve(scanFixture('A')); await tick();
+  const request = e.run('updateTracking()');
+  e.tracking.at(-1).resolve(freshTrackingResult()); await request; await tick();
+  return e;
+}
+
+test('visible quotes refresh after sixty seconds and schedule again only after completion', async () => {
+  const e = await trackedApp();
+  await e.advance(59999); assert.equal(e.tracking.length, 1);
+  await e.advance(1); assert.equal(e.tracking.length, 2);
+  assert.equal(e.tracking.at(-1).force, false);
+  await e.advance(120000); assert.equal(e.tracking.length, 2);
+  assert.equal(e.tracking.at(-1).signal.aborted, false);
+  e.tracking.at(-1).resolve(freshTrackingResult(13)); await tick();
+  await e.advance(59999); assert.equal(e.tracking.length, 2);
+  await e.advance(1); assert.equal(e.tracking.length, 3);
+  e.tracking.at(-1).resolve(freshTrackingResult(14)); await tick();
+});
+
+test('same-key tracking and foreground events share a slow in-flight request', async () => {
+  const e = appEnvironment();
+  e.scans[0].resolve(scanFixture('A')); await tick();
+  const first = e.run('updateTracking()'), same = e.run('updateTracking()');
+  assert.equal(first, same);
+  await e.advance(120000);
+  const focus = e.event('focus'), online = e.event('online'); e.event('pageshow');
+  await tick();
+  assert.equal(focus, online); assert.equal(e.run('foregroundPending'), focus);
+  assert.equal(e.tracking.length, 1);
+  assert.equal(e.tracking[0].signal.aborted, false);
+  e.tracking[0].resolve(freshTrackingResult()); await first; await focus; await tick();
+  assert.equal(e.timers.size, 1);
+});
+
+test('HTTP 200 unavailable and partial quotes retry after fifteen seconds', async () => {
+  for (const partial of [false, true]) {
+    const e = appEnvironment();
+    e.scans[0].resolve(scanFixture('A')); await tick();
+    const pending = e.run('updateTracking()');
+    const response = partial ? freshTrackingResult() : { quotes: { sh600000: { price: null, status: 'unavailable' } }, as_of: 'now' };
+    response.errors = { sh600000: partial ? 'missing previous close' : 'offline' };
+    e.tracking.at(-1).resolve(response); await pending;
+    await e.advance(14999); assert.equal(e.tracking.length, 1);
+    await e.advance(1); assert.equal(e.tracking.length, 2);
+    e.tracking.at(-1).resolve(freshTrackingResult()); await tick();
+  }
+});
+
+test('transport failures retry without a filter change and manual refresh bypasses cooldown', async () => {
+  const e = await trackedApp();
+  const forced = e.run('updateTracking(true)');
+  assert.equal(e.tracking.at(-1).force, true);
+  e.tracking.at(-1).reject(new Error('offline')); await forced;
+  assert.match(e.el('quoteSt').textContent, /行情更新失败/);
+  await e.advance(14999); assert.equal(e.tracking.length, 2);
+  await e.advance(1); assert.equal(e.tracking.length, 3);
+  assert.equal(e.tracking.at(-1).force, false);
+  e.tracking.at(-1).resolve(freshTrackingResult()); await tick();
+});
+
+test('hidden pages pause timers and returning to the foreground refreshes without duplicate events', async () => {
+  const e = await trackedApp();
+  e.setHidden(true); assert.equal(e.timers.size, 0);
+  await e.advance(180000); assert.equal(e.tracking.length, 1);
+  e.setHidden(false); e.event('focus'); e.event('online'); await tick();
+  assert.equal(e.tracking.length, 2);
+  assert.equal(e.tracking.at(-1).force, false);
+  e.tracking.at(-1).resolve(freshTrackingResult()); await tick();
+  await e.event('focus'); await e.event('online');
+  assert.equal(e.tracking.length, 2);
+  await e.advance(4999); await e.event('focus'); assert.equal(e.tracking.length, 2);
+});
+
+test('hiding does not cancel an existing quote request or schedule another until visible', async () => {
+  const e = appEnvironment();
+  e.scans[0].resolve(scanFixture('A')); await tick();
+  const pending = e.run('updateTracking()');
+  e.setHidden(true);
+  assert.equal(e.tracking.at(-1).signal.aborted, false);
+  e.tracking.at(-1).resolve(freshTrackingResult()); await pending;
+  assert.equal(e.timers.size, 0);
+  e.setHidden(false); await tick();
+  assert.equal(e.tracking.length, 1);
+  assert.equal(e.timers.size, 1);
+});
+
+test('pagehide pauses polling and pageshow restores it', async () => {
+  const e = await trackedApp();
+  e.event('pagehide'); assert.equal(e.timers.size, 0);
+  await e.advance(60000); assert.equal(e.tracking.length, 1);
+  const show = e.event('pageshow'); await tick();
+  assert.equal(e.tracking.length, 2);
+  e.tracking.at(-1).resolve(freshTrackingResult()); await show; await tick();
+  assert.equal(e.timers.size, 1);
+});
+
+test('crossing a local calendar day invalidates tracking freshness before the TTL expires', async () => {
+  const e = await trackedApp();
+  e.setNow(Date.parse('2026-10-14T23:59:59'));
+  const evening = e.run('updateTracking(true)');
+  e.tracking.at(-1).resolve(freshTrackingResult()); await evening;
+  e.setNow(Date.parse('2026-10-15T00:00:01'));
+  const morning = e.run('updateTracking()');
+  assert.equal(e.tracking.length, 3);
+  assert.equal(e.tracking.at(-1).force, false);
+  e.tracking.at(-1).resolve(freshTrackingResult()); await morning;
+});
+
+test('an empty filtered list cancels pending quotes and cannot restore a late old price', async () => {
+  const e = appEnvironment();
+  e.scans[0].resolve(scanFixture('A')); await tick();
+  const old = e.run('updateTracking()'), request = e.tracking.at(-1);
+  e.run("S.q='not-matching'; refresh()"); await e.advance(200);
+  assert.equal(request.signal.aborted, true);
+  assert.equal(e.el('btnQuotes').disabled, false);
+  assert.equal(e.timers.size, 0);
+  request.resolve(freshTrackingResult()); await old;
+  assert.equal(e.run('Object.keys(quotes).length'), 0);
+  assert.match(e.el('quoteSt').textContent, /没有需要跟踪/);
+});
+
+test('missing returned symbols clear their previously displayed quote and retry', async () => {
+  const e = await trackedApp();
+  const missing = e.run('updateTracking(true)');
+  e.tracking.at(-1).resolve({ quotes: {}, errors: {}, as_of: 'now' }); await missing;
+  assert.equal(e.run('quotes.sh600000.price'), null);
+  assert.equal(e.run('quotes.sh600000.status'), 'unavailable');
+  await e.advance(15000); assert.equal(e.tracking.length, 3);
+  e.tracking.at(-1).resolve(freshTrackingResult()); await tick();
+});
+
+test('returning to fresh cached symbols cancels another pending set and restores the completed status', async () => {
+  const e = appEnvironment(), data = scanFixture('A');
+  data.rows.push({ ...data.rows[0], code: '000001', symbol: 'sz000001', name: 'B' });
+  e.scans[0].resolve(data); await tick();
+  e.run("S.q='600000'");
+  const a = e.run('updateTracking()'); e.tracking.at(-1).resolve(freshTrackingResult()); await a;
+  const finished = e.el('quoteSt').textContent;
+  e.run("S.q='000001'; render()");
+  const b = e.run('updateTracking()'), request = e.tracking.at(-1);
+  assert.match(e.el('quoteSt').textContent, /正在更新/);
+  e.run("S.q='600000'; render(); updateTracking()");
+  assert.equal(request.signal.aborted, true);
+  assert.equal(e.tracking.length, 2);
+  assert.equal(e.el('quoteSt').textContent, finished);
+  assert.equal(e.el('btnQuotes').disabled, false);
+  request.resolve({ quotes: { sz000001: { ...freshTrackingResult().quotes.sh600000, price: 24 } }, errors: {}, as_of: 'late B' });
+  await b;
+  assert.equal(e.el('quoteSt').textContent, finished);
+  assert.equal(e.run('quotes.sz000001'), undefined);
+});
+
+function publishNewCatalog(e) {
+  e.ctx.catalogRows = [{ id: 'B', date: '2026-10-14', generated: '2026-10-14 00:01:00', hit: 1, freq: 'day' },
+    { id: 'A', date: '2026-10-09', generated: '2026-10-09 15:00:00', hit: 1, freq: 'day' }];
+}
+test('latest mode follows a newly published batch during visible polling', async () => {
+  const e = await trackedApp(); publishNewCatalog(e);
+  await e.advance(60000);
+  assert.equal(e.scans.length, 2); assert.equal(e.scans.at(-1).id, '');
+  e.scans.at(-1).resolve({ ...scanFixture('B', 20), generated: '2026-10-14 00:01:00' }); await tick();
+  assert.equal(e.run('D.scan_id'), 'B');
+  assert.equal(e.run('selectedDate'), '');
+  assert.equal(e.tracking.at(-1).id, 'B');
+  e.tracking.at(-1).resolve(freshTrackingResult(22)); await tick();
+});
+
+test('catalog updates keep an explicitly selected historical batch and its baseline', async () => {
+  const e = await trackedApp(); publishNewCatalog(e);
+  e.run("selectedDate='2026-10-09'; selectedSnapshot='A'");
+  await e.advance(60000);
+  assert.equal(e.scans.length, 1); assert.equal(e.run('D.scan_id'), 'A');
+  assert.equal(e.el('scanDate').value, '2026-10-09');
+  assert.equal(e.el('scanRun').value, 'A');
+  assert.equal(e.tracking.at(-1).id, 'A');
+  assert.equal(e.run('D.rows[0].close'), 10);
+  e.tracking.at(-1).resolve(freshTrackingResult()); await tick();
+});
+
+test('latest mode defers batch changes in open stock views while still syncing their quotes', async () => {
+  for (const panel of ['drawer', 'fundamentals']) {
+    const e = await trackedApp(); publishNewCatalog(e);
+    if (panel === 'drawer') e.drawer.openCode = 'sh600000'; else e.setFundamentalOpen(true);
+    await e.advance(60000); assert.equal(e.scans.length, 1);
+    e.tracking.at(-1).resolve(freshTrackingResult(13)); await tick();
+    if (panel === 'drawer') assert.equal(e.drawerUpdates.at(-1).quote.price, 13);
+    e.drawer.openCode = null; e.setFundamentalOpen(false);
+    await e.advance(60000); assert.equal(e.scans.length, 2);
+    e.scans.at(-1).resolve({ ...scanFixture('B', 20), generated: '2026-10-14 00:01:00' }); await tick();
+    assert.equal(e.run('D.scan_id'), 'B');
+    e.tracking.at(-1).resolve(freshTrackingResult(22)); await tick();
+  }
 });
 
 test('drawer daily and scan returns stay separate when one baseline is unavailable', () => {

@@ -48,6 +48,8 @@ select:focus,input:focus{border-color:var(--acc)}
 .fld[hidden]{display:none}
 .price-up{color:var(--up)} .price-down{color:var(--dn)}
 .quote-time{display:block;font-size:10px;color:var(--tx3);white-space:nowrap}
+.quote-day{font-size:12px;color:var(--tx2);white-space:nowrap;background:#eef4fb;border-radius:5px;padding:3px 8px}
+.current-price-cell{min-width:126px;white-space:nowrap}.current-price-cell b{font-size:14px;font-weight:600}
 .tracking-state{font-size:11.5px;white-space:nowrap;color:var(--tx2)}
 .tracking-state.breached{color:var(--up);background:var(--upbg);border-radius:4px;padding:2px 5px}
 .history-panel #quoteSt{flex:1;min-width:220px}

@@ -121,14 +121,19 @@ const Drawer = (() => {
   function trackingMetaHTML() {
     const q = cur?.tracking;
     const cumulative = q?.scan_change_pct ?? q?.change_pct;
+    const price = typeof q?.price === 'number' && Number.isFinite(q.price) && q.price > 0 ? q.price.toFixed(2) : '—';
+    const quoteDate = typeof q?.date === 'string' && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(q.date) ? q.date : '';
+    const [tradingDate, quoteTime] = quoteDate.split(' ');
+    const priceColor = q?.daily_change_pct > 0 ? 'price-up' : q?.daily_change_pct < 0 ? 'price-down' : '';
     return cur?.scan_at ?
+      `<div style="flex-basis:100%">当前最新价 <strong class="${priceColor}" style="font-size:16px">${price}</strong>` +
+      ` · 行情交易日 ${esc(tradingDate || '未获取')} · 报价时间 ${esc(quoteTime || '未获取')}</div>` +
       `<span>跟踪扫描 ${esc(cur.scan_at)} · 扫描价 <b>${cur.close != null ? (+cur.close).toFixed(2) : '—'}</b>` +
-      ` · 最新报价 <b>${q?.price != null ? (+q.price).toFixed(2) : '—'}</b>` +
       ` · 昨收价 <b>${q?.previous_close != null ? (+q.previous_close).toFixed(2) : '—'}</b>` +
       ` · 当天涨跌值 ${trackingNumber(q?.daily_change)}` +
       ` · 当天涨跌幅 ${trackingNumber(q?.daily_change_pct, true)}` +
       ` · 扫描后至今涨跌幅 ${trackingNumber(cumulative, true)}` +
-      `${q?.buy_stop_breached ? ' · 触及原买点失效位' : ''} · 报价时间 ${esc(q?.date || '未获取')}</span>` : '';
+      `${q?.buy_stop_breached ? ' · 触及原买点失效位' : ''}</span>` : '';
   }
   function renderMeta(d) {
     if (d) {

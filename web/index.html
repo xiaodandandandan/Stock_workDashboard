@@ -31,6 +31,7 @@
         <select id="scanRun"></select>
       </div>
       <button class="btn" id="btnQuotes">刷新行情</button>
+      <span class="quote-day" id="currentQuoteDay"></span>
       <span class="hint" id="quoteSt" role="status" aria-live="polite"></span>
     </div>
     <div class="hint">当天涨跌值 = 最新价 − 昨收价；当天涨跌幅以昨收价为基准。扫描后至今涨跌幅以所选批次扫描价为基准，均截至各票报价时间；历史信号保持当时状态。</div>
@@ -89,21 +90,21 @@
   </div>
 
   <div class="panel" style="padding:0">
-    <div class="tablewrap">
+    <div class="tablewrap" tabindex="0" aria-label="买卖点列表，可左右滚动查看全部价格和涨跌列">
       <table class="stock-table">
         <thead><tr>
           <th class="sortable" data-s="c">代码</th>
           <th class="sortable" data-s="n">名称</th>
-          <th class="sortable" data-s="i">行业</th>
           <th>信号</th>
-          <th class="sortable" data-s="d">信号日</th>
-          <th class="sortable" data-s="fr">新鲜度</th>
-          <th class="num sortable" data-s="st">关键位</th>
           <th class="num sortable" data-s="p">扫描价</th>
-          <th class="num sortable" data-s="lp">最新价</th>
+          <th class="num sortable current-price-cell" data-s="lp" title="当前获取的最新报价；下方日期为行情实际报价时间，休市时可能为上个交易日">当前最新价</th>
           <th class="num sortable" data-s="chg" title="最新价减行情源昨收价">当天涨跌值</th>
           <th class="num sortable daily-return-cell" data-s="dpct" title="最新价相对行情源昨收价的当天涨跌幅">当天涨跌幅</th>
           <th class="num sortable scan-return-cell" data-s="pct" title="最新报价相对所选批次扫描价的累计涨跌幅">扫描后至今涨跌幅</th>
+          <th class="sortable" data-s="i">行业</th>
+          <th class="sortable" data-s="d">信号日</th>
+          <th class="sortable" data-s="fr">新鲜度</th>
+          <th class="num sortable" data-s="st">关键位</th>
           <th class="tracking-cell">买点跟踪</th>
           <th class="num sortable" data-s="a">估算成交额(亿)</th>
           <th class="fundamental-action">基本面</th>
