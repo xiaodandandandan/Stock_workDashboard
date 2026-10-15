@@ -5,14 +5,31 @@
 「三类买点 · 关键位 60.40」和点开后图上画的中枢下沿、卡片里的关键位必然是一个数 ——
 两个入口各算各的，迟早会出现「榜上有、图上没有」这种自相矛盾。
 
-买点用技能引擎 `chanlun_core.detect()`；卖点是它的严格镜像 `core.sell.detect_sell()`
-（阈值常量共用，不另设）。
+买点用技能引擎 `chanlun_core.detect()`；卖点由 `core.sell.detect_sell()` 按独立、
+有版本标识的上涨笔 MACD 红柱面积与一/二/三卖结构规则计算。
 """
-from . import require_engine
+import hashlib
+import json
+from pathlib import Path
+
+from . import engine_identity, require_engine
 
 K = require_engine()             # 缺失时抛带「该放哪个目录」指引的 ImportError
 
 from . import sell as S
+
+# Fingerprint the running pipeline once. Replacing source files requires a restart.
+_PIPELINE_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+
+
+def analysis_identity():
+    """Identify both signal rule sets without changing the raw K-line data version."""
+    sell_sha = engine_identity(S)["sha256"]
+    rules_version = str(getattr(S, "SELL_RULES_VERSION", None) or ("sha256:" + sell_sha[:12]))
+    components = {"pipeline": _PIPELINE_SHA256, "buy_engine": engine_identity(K)["sha256"],
+                  "sell_rules": sell_sha, "sell_rules_version": rules_version}
+    digest = hashlib.sha256(json.dumps(components, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return {"analysis_version": digest, "sell_rules_version": rules_version}
 
 # 一类买点「趋势要件」的判据键前缀 —— 引擎把它当参考项放进 why 列表末尾
 _TREND_KEY = "趋势"
@@ -113,10 +130,15 @@ def pack_signals(hs, kind, fm, px, lookback=5, bars=None, life=None):
         tr = why[-1] if why and str(why[-1].get("k", "")).startswith(_TREND_KEY) else None
         stop = h.get("stop")
         if stop:
-            # 买点：现价跌破结构位即失效；卖点：涨破即失效。
+            # 买点仍要求高于失效位；一/二卖允许等于前高，三卖必须严格低于 ZD。
             # ★ 引擎对一类买点不校验当前价 —— 报出后价格若跌破本段底、笔端点又没确认，
             #   信号还会挂着，那就是「已失效」，必须自己判。
-            valid = 1 if ((px > stop) if kind == "b" else (px < stop)) else 0
+            if kind == "b":
+                valid = 1 if px > stop else 0
+            elif h["type"] in ("一类卖点", "二类卖点"):
+                valid = 1 if px <= stop else 0
+            else:
+                valid = 1 if px < stop else 0
         else:
             valid = 1
         fresh = fm.get((kind, h["type"], str(h["date"])), lookback)

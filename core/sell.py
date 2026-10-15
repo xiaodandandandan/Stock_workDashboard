@@ -1,40 +1,25 @@
 # -*- coding: utf-8 -*-
-"""缠论卖点 —— chanlun_core.detect()（只做买点）的严格镜像。
+"""按上涨笔、中枢下沿识别卖点；买点仍由原引擎负责。
 
-引擎 `chanlun_core` 只有买点：一类（底背驰）/二类（反弹不破前低）/三类（突破中枢上沿）。
-本模块把它逐条镜像成卖点，口径一一对应，不做任何额外放宽：
+一卖：相邻两段上涨笔创新高，后一笔 MACD 正柱面积严格缩小。
+二卖：一卖后的下跌笔、反弹笔，反弹高点不超过一卖高点。
+三卖：跌破已有中枢 ZD 后，反弹上涨笔的高点严格低于 ZD。
 
-    买点（引擎原文）                      卖点（本模块镜像）
-    ─────────────────────────────────────────────────────────────
-    一类 = 下跌段底背驰                    一类 = 上涨段顶背驰
-       · 本段底 < 前段底（创新低）            · 本段顶 > 前段顶（创新高）
-       · 绿柱面积 |a1| < |a2|*0.85            · 红柱面积 |a1| < |a2|*0.85
-       · a2 < 0（前段是下跌）                 · a2 > 0（前段是上涨）
-       · 时效 <= RECENT_BARS                  · 同
-    二类 = 一类后反弹、回踩不破前低         二类 = 一类后下跌、反弹不破前高
-    三类 = 向上突破中枢上沿 ZG              三类 = 向下跌破中枢下沿 ZD
-       · 回抽低点 > ZG                        · 反抽高点 < ZD
-       · 回撤 >= MIN_PULLBACK                 · 同（幅度）
-       · 距 ZG <= MAX_DIST_ZG                 · 距 ZD <= MAX_DIST_ZG
-
-阈值常量全部从 chanlun_core 复用，不另设，保证买卖对称。
+沿用引擎的分型、笔及中枢识别。末端笔可能随行情延伸；历史回放仅使用
+当时已经出现的 K 线，first_i 记录首次识别时间，不回填到结构顶点当天。
 """
 from . import require_engine
 
-K = require_engine()             # 缺失时抛带「该放哪个目录」指引的 ImportError
+K = require_engine()
 from chanlun_core import (merge_bars, find_fenxing, find_bi, find_zhongshu,
-                          macd, area, _why, _ds,
-                          RECENT_BARS, MIN_REBOUND, MIN_PULLBACK, MAX_DIST_ZG)
+                          macd, area, _why, _ds, RECENT_BARS)
 
+SELL_RULES_VERSION = "2026-10-16-v2"
 SELL_TYPES = ("一类卖点", "二类卖点", "三类卖点", "中枢跌破")
 
 
 def _trend_note_up(zs_list, before_i):
-    """一类卖点的『上涨趋势』参考核验 —— `_trend_note` 的镜像。
-
-    下跌趋势回溯链要求越早的中枢**越高**（ZD > 上一层 ZG）；
-    上涨趋势镜像：越早的中枢**越低**（ZG < 上一层 ZD）。
-    """
+    """上涨趋势仅作为参考，不额外限制用户定义的一卖。"""
     zs = [z for z in zs_list if z["i1"] <= before_i]
     chain = []
     for z in reversed(zs):
@@ -51,167 +36,182 @@ def _trend_note_up(zs_list, before_i):
 
 
 def detect_sell(bars, on_candidate=None):
-    """四类卖点。返回与 detect() 同构的 [{'type','date','ZG','ZD','stop','close','note','why'}]。
+    """返回与买点 detect 同构的信号。stop 为涨破即失效的结构位。
 
-    `stop` 语义镜像：买点是「跌破即失效的结构位」（取低点），
-    卖点是「涨破即失效的结构位」（取高点）。
+    一、二卖允许现价等于前高；三卖触及 ZD 即不成立。二卖的一卖锚点
+    独立保存于结构回溯中，不会因出现新反弹笔而丢失，也不会突破后复活。
     """
+    if len(bars) < 2:
+        return []
     closes = [b["close"] for b in bars]
     highs = [b["high"] for b in bars]
     lows = [b["low"] for b in bars]
     last_i = len(bars) - 1
-
-    mb = merge_bars([(i, highs[i], lows[i]) for i in range(len(bars))])
-    fx = find_fenxing(mb)
-    pts = find_bi(fx)
+    cur = closes[-1]
+    pts = find_bi(find_fenxing(merge_bars(
+        [(i, highs[i], lows[i]) for i in range(len(bars))])))
+    zs_all = find_zhongshu(pts) if len(pts) >= 4 else []
     res = []
 
-    # ---- 跌破中枢下沿 / 三类卖点（镜像 detect 的第一段）
-    if len(pts) >= 4:
-        zs_list = find_zhongshu(pts)
-        if zs_list:
-            z = zs_list[-1]
-            i1 = z["i1"]
-            if i1 < last_i:
-                cur = closes[last_i]
-                brk = None
-                for j in range(i1, last_i + 1):
-                    if closes[j] < z["ZD"]:
-                        brk = j
-                        break
-                if brk is not None and (last_i - brk) <= 20 and cur < z["ZD"]:
-                    seg_h = highs[brk:last_i + 1]
-                    seg_l = lows[brk:last_i + 1]
-                    brk_lo = min(seg_l)
-                    lo_pos = brk + seg_l.index(brk_lo)
-                    rb_hi = max(seg_h)
-                    hi_pos = brk + seg_h.index(rb_hi)
-                    rb = (rb_hi - brk_lo) / brk_lo if brk_lo > 0 else 0.0
-                    dist = (z["ZD"] - cur) / z["ZD"] if z["ZD"] > 0 else 1.0
-                    if (rb_hi < z["ZD"] and last_i - brk >= 2
-                            and rb >= MIN_PULLBACK
-                            and dist <= MAX_DIST_ZG):
-                        res.append({"type": "三类卖点", "date": bars[hi_pos]["date"],
-                                    "ZG": z["ZG"], "ZD": z["ZD"], "stop": z["ZD"],
-                                    "close": cur,
-                                    "note": f"反抽{rb * 100:.0f}%不破ZD 距ZD{dist * 100:.0f}%"
-                                            f"{'（反抽后已新低）' if hi_pos < lo_pos else ''}",
-                                    "why": [
-                                        _why("① 向下突破中枢",
-                                             "%s 收盘 %.2f 跌破 ZD"
-                                             % (_ds(bars[brk]["date"]), closes[brk]),
-                                             "收盘 < ZD %.2f" % z["ZD"], 1),
-                                        _why("② 反抽不回到中枢内",
-                                             "反抽高点 %.2f" % rb_hi,
-                                             "< ZD %.2f" % z["ZD"], rb_hi < z["ZD"]),
-                                        _why("③ 反抽幅度（防假跌破）",
-                                             "%.1f%%" % (rb * 100),
-                                             "≥ %.0f%%" % (MIN_PULLBACK * 100),
-                                             rb >= MIN_PULLBACK),
-                                        _why("④ 离 ZD 不能太远（避免杀跌追空）",
-                                             "%.1f%%" % (dist * 100),
-                                             "≤ %.0f%%" % (MAX_DIST_ZG * 100),
-                                             dist <= MAX_DIST_ZG),
-                                    ]})
-                    elif last_i - brk <= 5:
-                        res.append({"type": "中枢跌破", "date": bars[brk]["date"],
-                                    "ZG": z["ZG"], "ZD": z["ZD"], "stop": z["ZD"],
-                                    "close": cur, "note": "跌破下沿待验证"})
+    # 后缀最高价用于检查结构位是否曾被突破，避免已失效信号再次复活。
+    suffix_high = [float("-inf")] * (len(bars) + 1)
+    for i in range(last_i, -1, -1):
+        suffix_high[i] = max(highs[i], suffix_high[i + 1])
 
-    # ---- 一类 / 二类卖点：上涨笔的 MACD 红柱面积背驰
-    _, _, bar = macd(closes)
-    if bar and len(pts) >= 4:
-        zs_all = find_zhongshu(pts)
-        ups = []
+    # ---- 三卖：已有中枢 -> 下跌笔 -> 反弹上涨笔。
+    # 只取出发顶之前已存在的最近中枢，不能使用跌破/反弹本身形成的新中枢。
+    third = []
+    for k in range(len(pts) - 2):
+        top, bottom, rebound = pts[k:k + 3]
+        if (top["t"], bottom["t"], rebound["t"]) != (1, -1, 1):
+            continue
+        ti, bi, ri = top["i"], bottom["i"], rebound["i"]
+        if not (0 <= ti < bi < ri <= last_i):
+            continue
+        centers = [z for z in zs_all if z["i1"] <= ti]
+        if not centers:
+            continue
+        z = max(centers, key=lambda item: item["i1"])
+        zd = z["ZD"]
+        if not (top["p"] >= zd > bottom["p"] and rebound["p"] < zd):
+            continue
+        # 破位必须发生在下跌笔中；不把破位 K 线/下跌笔的高点算作反弹。
+        brk = next((i for i in range(max(ti, z["i1"] + 1), bi + 1)
+                    if closes[i] < zd), None)
+        if brk is None or last_i - ri > RECENT_BARS:
+            continue
+        # 底部 K 线的高点可能属于下跌过程；真正反弹从底点之后开始。
+        # 从反弹起若触及/收回 ZD，旧三卖失效，之后下跌不能让它复活。
+        if suffix_high[bi + 1] >= zd or cur >= zd:
+            continue
+        third.append({"type": "三类卖点", "date": bars[ri]["date"],
+                      "anchor_date": bars[brk]["date"],
+                      "ZG": z["ZG"], "ZD": zd, "stop": zd, "close": cur,
+                      "note": "跌破 ZD 后反弹高点 %.2f < ZD %.2f" % (rebound["p"], zd),
+                      "why": [
+                          _why("① 跌破前已有中枢",
+                               "%s 已形成 [%.2f, %.2f]" %
+                               (_ds(bars[z["i1"]]["date"]), zd, z["ZG"]),
+                               "中枢形成不晚于下跌笔出发顶", 1),
+                          _why("② 下跌笔向下跌破中枢",
+                               "%s 收盘 %.2f；下跌笔 %.2f → %.2f" %
+                               (_ds(bars[brk]["date"]), closes[brk], top["p"], bottom["p"]),
+                               "收盘 < ZD %.2f" % zd, 1),
+                          _why("③ 反弹上涨笔不能回到中枢",
+                               "%s 低点 %.2f → %s 反弹高点 %.2f" %
+                               (_ds(bars[bi]["date"]), bottom["p"],
+                                _ds(bars[ri]["date"]), rebound["p"]),
+                               "反弹高点 < ZD %.2f（触及也不成立）" % zd, 1),
+                          _why("④ 时效", "距反弹顶 %d 根" % (last_i - ri),
+                               "≤ %d 根" % RECENT_BARS, 1),
+                      ]})
+    if third:
+        res.append(max(third, key=lambda s: str(s["date"])))
+    elif zs_all:
+        # 保留独立的“中枢跌破”观察状态，不能把尚无上涨反弹笔的下跌算作三卖。
+        z = max(zs_all, key=lambda item: item["i1"])
+        if z["i1"] < last_i and cur < z["ZD"]:
+            brk = last_i
+            while brk > z["i1"] + 1 and closes[brk - 1] < z["ZD"]:
+                brk -= 1
+            if last_i - brk <= 5:
+                res.append({"type": "中枢跌破", "date": bars[brk]["date"],
+                            "ZG": z["ZG"], "ZD": z["ZD"], "stop": z["ZD"],
+                            "close": cur, "note": "跌破下沿，等待上涨笔反弹验证"})
+
+    # ---- 一卖：仅比较相邻两段上涨笔各自的 MACD 正柱面积。
+    _, _, histogram = macd(closes)
+    ups = []
+    if histogram:
         for k in range(len(pts) - 1):
-            if pts[k]["t"] == -1 and pts[k + 1]["t"] == 1:
-                ups.append((pts[k], pts[k + 1]))
-        if len(ups) >= 2:
-            (b2, t2), (b1, t1) = ups[-2], ups[-1]
-            i_b2, i_t2 = b2["i"], t2["i"]
-            i_b1, i_t1 = b1["i"], t1["i"]
-            a2 = area(bar, i_b2, i_t2, 1)
-            a1 = area(bar, i_b1, i_t1, 1)
-            high1 = highs[i_t1]
-            new_high = t1["p"] > t2["p"]
-            if new_high and abs(a1) < abs(a2) * 0.85 and a2 > 0 and (last_i - i_t1) <= RECENT_BARS:
-                res.append({"type": "一类卖点", "date": bars[i_t1]["date"],
-                            "ZG": None, "ZD": None, "stop": high1,
-                            "close": closes[last_i],
-                            "note": f"顶背驰 面积 {abs(a1):.2f} < {abs(a2):.2f}",
-                            "why": [
-                                _why("① 创新高（上涨段的高点要更高）",
-                                     f"本段顶 %.2f > 前段顶 %.2f" % (t1["p"], t2["p"]),
-                                     "本段顶 > 前段顶", new_high),
-                                _why("② 力度衰竭（MACD 红柱面积收缩）",
-                                     "%.2f / %.2f = %.1f%%"
-                                     % (abs(a1), abs(a2), abs(a1) / abs(a2) * 100),
-                                     "< 85%", abs(a1) < abs(a2) * 0.85),
-                                _why("③ 前段必须是上涨段",
-                                     "A2 面积 %.2f" % a2, "A2 > 0", a2 > 0),
-                                _why("④ 时效（信号不能太老）",
-                                     f"距今 %d 根" % (last_i - i_t1),
-                                     "≤ %d 根" % RECENT_BARS,
-                                     (last_i - i_t1) <= RECENT_BARS),
-                                _trend_note_up(zs_all, i_t1),
-                            ]})
-                if last_i - i_t1 >= 3:
-                    seg_l = min(lows[i_t1:last_i + 1])
-                    drop = (high1 - seg_l) / high1 if high1 > 0 else 0
-                    if drop >= MIN_REBOUND:
-                        tail = highs[i_t1 + 1:last_i + 1]
-                        j_rel = tail.index(max(tail))
-                        j = i_t1 + 1 + j_rel
-                        trough_rel = lows[i_t1:last_i + 1].index(seg_l)
-                        if trough_rel > 0 and j > i_t1 + trough_rel and high1 > 0:
-                            pull_hi = tail[j_rel]
-                            if pull_hi < high1 and j >= i_t1 + 2:
-                                res.append({"type": "二类卖点", "date": bars[j]["date"],
-                                            "ZG": None, "ZD": None, "stop": high1,
-                                            "close": closes[last_i],
-                                            "note": f"下跌{drop * 100:.0f}%后反弹{pull_hi:.2f}不破一类高点",
-                                            "why": [
-                                                _why("① 前提：一类卖点已成立",
-                                                     "顶 %.2f（%s）"
-                                                     % (high1, _ds(bars[i_t1]["date"])),
-                                                     "必须先有一类卖点", 1),
-                                                _why("② 下跌幅度够（确认转折）",
-                                                     "-%.1f%%（%.2f → %.2f）"
-                                                     % (drop * 100, high1, seg_l),
-                                                     "≥ %.1f%%" % (MIN_REBOUND * 100),
-                                                     drop >= MIN_REBOUND),
-                                                _why("③ 反弹不破一类高点",
-                                                     "反弹高点 %.2f" % pull_hi,
-                                                     "< 一类高点 %.2f" % high1,
-                                                     pull_hi < high1),
-                                                _why("④ 反弹发生在下跌低点之后",
-                                                     "低点后第 %d 根" % (j - (i_t1 + trough_rel)),
-                                                     "必须在下跌低点之后",
-                                                     j > i_t1 + trough_rel),
-                                            ]})
-                        else:
-                            if on_candidate is not None and closes[last_i] < high1:
-                                on_candidate({"type": "二类候选",
-                                              "date": bars[i_t1]["date"],
-                                              "close": closes[last_i],
-                                              "ZG": None, "ZD": None, "stop": high1,
-                                              "note": f"下跌{drop * 100:.0f}%后未反弹，涨破{high1:.2f}即失效"})
+            bottom, top = pts[k:k + 2]
+            if (bottom["t"], top["t"]) == (-1, 1):
+                ups.append((k, bottom, top, area(histogram, bottom["i"], top["i"], 1)))
+
+    first, second = [], []
+    for previous, current in zip(ups, ups[1:]):
+        _, old_bottom, old_top, old_area = previous
+        k, bottom, top, current_area = current
+        ti, high = top["i"], top["p"]
+        # 不取绝对值：比较的是正柱面积；前一笔无正柱时没有可比上涨力度。
+        if not (top["p"] > old_top["p"] and 0 <= current_area < old_area and old_area > 0):
+            continue
+        if suffix_high[ti + 1] > high:
+            continue
+        comparison = [
+            _why("① 相邻两段上涨笔创新高",
+                 "前笔 %s → %s（顶 %.2f）；本笔 %s → %s（顶 %.2f）" %
+                 (_ds(bars[old_bottom["i"]]["date"]), _ds(bars[old_top["i"]]["date"]),
+                  old_top["p"], _ds(bars[bottom["i"]]["date"]),
+                  _ds(bars[ti]["date"]), high), "本笔顶 > 前笔顶", 1),
+            _why("② 上涨笔 MACD 正柱面积缩小",
+                 "本笔 %.6g < 前笔 %.6g（比值 %.6g%%）" %
+                 (current_area, old_area, current_area / old_area * 100),
+                 "本笔正柱面积 < 前笔正柱面积，前笔面积 > 0", 1),
+        ]
+        if last_i - ti <= RECENT_BARS:
+            first.append({"type": "一类卖点", "date": bars[ti]["date"],
+                          "ZG": None, "ZD": None, "stop": high, "close": cur,
+                          "note": "上涨笔顶背驰：正柱面积 %.6g < %.6g" % (current_area, old_area),
+                          "why": comparison + [
+                              _why("③ 时效", "距上涨笔顶 %d 根" % (last_i - ti),
+                                   "≤ %d 根" % RECENT_BARS, 1),
+                              _trend_note_up(zs_all, ti),
+                          ]})
+
+        # ---- 二卖：保留上述一卖锚点，紧接它的下跌笔、上涨反弹笔。
+        # 之后更低的反弹不会改变这次二卖的日期；父锚点可早于信号时效窗口。
+        following = pts[k + 2:k + 4]
+        if len(following) == 2:
+            low, rebound = following
+            li, ri = low["i"], rebound["i"]
+            if ((low["t"], rebound["t"]) == (-1, 1)
+                    and ti < li < ri and low["p"] < high
+                    and low["p"] < rebound["p"] <= high
+                    and last_i - ri <= RECENT_BARS):
+                second.append({"type": "二类卖点", "date": bars[ri]["date"],
+                               "anchor_date": bars[ti]["date"],
+                               "ZG": None, "ZD": None, "stop": high, "close": cur,
+                               "note": "一卖后反弹 %.2f ≤ 一卖高点 %.2f" % (rebound["p"], high),
+                               "why": [
+                                   _why("① 前提：一类卖点已成立",
+                                        "%s 顶 %.2f；上涨笔正柱面积 %.6g < %.6g" %
+                                        (_ds(bars[ti]["date"]), high, current_area, old_area),
+                                        "先有创新高且力度缩小的一卖", 1),
+                                   _why("② 一卖后先有下跌笔",
+                                        "%s 顶 %.2f → %s 底 %.2f" %
+                                        (_ds(bars[ti]["date"]), high,
+                                         _ds(bars[li]["date"]), low["p"]),
+                                        "一卖顶之后出现下跌笔", 1),
+                                   _why("③ 之后反弹不超过前高",
+                                        "%s 反弹高点 %.2f" %
+                                        (_ds(bars[ri]["date"]), rebound["p"]),
+                                        "≤ 一卖高点 %.2f（允许等高）" % high, 1),
+                                   _why("④ 时效", "距反弹顶 %d 根" % (last_i - ri),
+                                        "≤ %d 根" % RECENT_BARS, 1),
+                               ]})
+        elif on_candidate is not None and k + 2 < len(pts):
+            low = pts[k + 2]
+            if (low["t"] == -1 and low["p"] < high
+                    and last_i - low["i"] <= RECENT_BARS and cur <= high):
+                on_candidate({"type": "二类候选", "date": bars[ti]["date"],
+                              "close": cur, "ZG": None, "ZD": None, "stop": high,
+                              "note": "一卖后已有下跌笔，等待反弹；涨破 %.2f 即失效" % high})
+    if first:
+        res.append(max(first, key=lambda s: str(s["date"])))
+    if second:
+        res.append(max(second, key=lambda s: str(s["date"])))
     return res
 
 
 def scan_signals_sell(bars, min_bars=120, step=1, types=None):
-    """`chanlun_core.scan_signals()` 的卖点镜像 —— 逐时点切片复算 detect_sell()。
+    """按当时可知的 K 线逐时点复算；不同结构锚点分开记录存活期。
 
-    合并规则与原版逐条一致：同一 type 且报出时点连续（cut 间隔 ≤ step）的，视为
-    同一个信号段（= 该信号的存活期）。每段记录 first_i / last_i / alive / sig_date。
-
-    ★ 买点侧直接调引擎的 `scan_signals`，卖点侧必须自己镜像一份 —— 少了它，
-      「存活 N 根」这个数在卖点卡片上就只能空着，或者退回用 fresh 顶替。
-      fresh 是「距今几根」，对窗口外的老信号会饱和成 lookback，拿它当存活根数是错的。
-
-    ★ 成本：800 根日 K 约 0.44 s（和买点侧同量级）。这是**抽屉专用**的重活，
-      全市场扫描绝不能调 —— 5572 只 × 0.9 s 就是 80 分钟。
+    first_i / last_i 是报出时点，sig_date 是结构顶点日期。仅供个股历史
+    分析调用；全市场扫描不做逐根完整回放。
     """
+    if step < 1:
+        raise ValueError("step must be positive")
     if len(bars) < 40:
         return []
     min_bars = max(20, min(min_bars, len(bars) - 1))
@@ -222,13 +222,13 @@ def scan_signals_sell(bars, min_bars=120, step=1, types=None):
             t = h["type"]
             if types is not None and t not in types:
                 continue
-            prev = last.get(t)
+            identity = (t, str(h["date"]), str(h.get("anchor_date", "")),
+                        h.get("stop"), h.get("ZG"), h.get("ZD"))
+            prev = last.get(identity)
             if prev is not None and cut - prev[0] <= step:
                 g = segs[prev[1]]
                 g["last_i"] = cut - 1
                 g["alive"] = cut - 1 - g["first_i"]
-                g["sig_date"] = h["date"]
-                g["stop"] = h.get("stop")
                 g["note"] = h.get("note", "")
                 g["why"] = h.get("why")
                 idx = prev[1]
@@ -239,6 +239,6 @@ def scan_signals_sell(bars, min_bars=120, step=1, types=None):
                      "note": h.get("note", ""), "why": h.get("why")}
                 segs.append(g)
                 idx = len(segs) - 1
-            last[t] = (cut, idx)
+            last[identity] = (cut, idx)
     segs.sort(key=lambda g: g["first_i"])
     return segs

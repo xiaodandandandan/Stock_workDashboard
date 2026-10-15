@@ -161,7 +161,7 @@ python scan.py --freq m60 --count 800        # 扫描 60 分钟周期
 | 公司公告与媒体新闻 | 东方财富公告与新闻检索，分开记录覆盖状态、发布时间及来源 |
 | 估算成交额 | 收盘价 × 成交量，再换算为亿元；不是逐笔成交金额之和 |
 | 买点 | 外部引擎 `chanlun_core.detect()` |
-| 卖点 | 项目内 `core/sell.py`，镜像买点规则 |
+| 卖点 | 项目内 `core/sell.py`，按下述独立规则识别 |
 
 行业列表展示一级分类，例如“金融”“交运设备”；接口还保留完整分类路径。
 
@@ -171,6 +171,22 @@ python scan.py --freq m60 --count 800        # 扫描 60 分钟周期
 - **未失效**：榜单检查当次扫描价是否越过信号的失效位；查看旧榜单时保留当次扫描的判定。
 - **引擎持续报出**：历史信号是否一直被引擎识别到最后一根，与“未失效”是不同条件。
 - **历史信号涨跌**：描述信号报出期间的价格变化，不等同于可执行交易策略的收益。
+
+### 卖点规则
+
+卖点规则版本为 `2026-10-16-v2`，买点继续使用外部引擎原有规则。笔和中枢沿用 `find_bi`、`find_zhongshu` 的结构定义，卖点按以下时序识别：
+
+| 类型 | 条件与边界 |
+| --- | --- |
+| 一类卖点 | 比较连续两段上涨笔：后一笔高点严格创新高，且 MACD 正柱累计面积严格小于前一笔，前一笔面积须大于零。面积比须 `< 100%`，相等不成立；不再使用原来的 85% 门槛。 |
+| 二类卖点 | 保留已成立的一卖锚点，之后先有下跌笔，再有反弹上涨笔；反弹高点 `<=` 一卖高点，等高允许。锚点之后若价格曾超过一卖高点，该锚点即失效；不再另加 3% 下跌幅度门槛。 |
+| 三类卖点 | 先存在中枢，再有向下离开笔，其间收盘价跌破中枢下沿 `ZD`；随后反弹上涨笔的高点须严格 `< ZD`，触及下沿不成立。不再另加 5% 反弹幅度或距下沿 30% 的限制。 |
+
+一、二、三类卖点按各自结构日期保留最近 `RECENT_BARS=60` 根 K 线；二卖只检查自身日期，作为前提的一卖锚点可以更早。这里的 60 根是对应周期的 K 线数量，与筛选中的“新鲜度”不同。只有跌破中枢、尚未满足三卖反弹条件时，“中枢跌破”仍属于待验证结构状态。
+
+引擎保留当前最后一笔，其端点仍可能延伸，不要求后续完整反向笔结束后才识别。结构日期表示笔端点的位置；回放的 `first_i` 表示按当时已有 K 线首次能够报出的时点，两者可能相隔多根 K 线。图表和判据会随后续结构变化更新。
+
+已有历史扫描档案保留当时的信号，不会按新版规则改写。重新扫描才会发布使用新版卖点规则的榜单，并记录对应规则版本。
 
 ### 按日期查看与行情跟踪
 
@@ -253,7 +269,7 @@ POST 扫描接受 JSON 对象：
 
 单票接口支持 `lookback=30..5000` 和 `report=0|1`。非法参数返回 HTTP 400，扫描请求体最多 8 KiB。
 
-`/api/scans` 返回 `snapshots` 数组，每项包含 `id`、`generated`、`date`、`freq`、`hit` 和 `total_scanned`。历史接口中的 `snapshot` 使用其中的批次 ID。跟踪接口中的 `codes` 必须指定 1～800 个股票，使用带交易所前缀的完整标识，且应属于所选快照；跟踪行情独立于历史信号，不会重新计算该批次的买卖点。
+`/api/scans` 返回 `snapshots` 数组，每项包含 `id`、`generated`、`date`、`freq`、`hit` 和 `total_scanned`；快照已有版本记录时，另带 `analysis_version` 和 `sell_rules_version`。历史接口中的 `snapshot` 使用其中的批次 ID。跟踪接口中的 `codes` 必须指定 1～800 个股票，使用带交易所前缀的完整标识，且应属于所选快照；跟踪行情独立于历史信号，不会重新计算该批次的买卖点。
 
 跟踪响应按 `quotes[symbol]` 返回 `price`、`previous_close`、`date`、`daily_change`、`daily_change_pct`、`scan_change`、`scan_change_pct` 与买点跟踪状态。`daily_*` 以行情源昨收价为基准；`scan_*` 以所选批次扫描价为基准。旧字段 `change`、`change_pct` 保留为累计涨跌的兼容别名，新页面使用明确的当天与累计字段。
 
@@ -270,6 +286,8 @@ POST 扫描接受 JSON 对象：
 `report` 提供 `board`、`label`、`latest_report_date`、`headline`、`kpis`、`conclusions`、`risk_exposure`、`cash_quality`、`valuation_notes`、`scenarios`、`checklist`、`regulatory_checks`、`annual_coverage`、`business_segments`、`verification`、`non_recurring_difference`、`generated` 和 `notice`。金额为元，`ratio`、`cash_content` 为倍数；`non_recurring_difference` 仅为归母减扣非的算术差额，`annual_coverage` 标明目标年数、实际范围与 `missing_years`。`verification.status=pending` 表示尚未完成原文核验，`regulatory_checks` 的待核验事项不能当作已经认定触发或未触发的法律结论。
 
 单票响应包含完整 `symbol`、`freq`、`data_version`、`engine` 和 `source`。扫描响应包含 `errors`、`complete`、`skipped` 与 `industry_status`，接入时应同时检查这些字段。
+
+新单票及扫描结果另含 `analysis_version`（本地分析代码与外部买点引擎的组合摘要）和 `sell_rules_version`（卖点规则版本）。`/api/health` 顶层表示当前运行版本，`scan` 中表示最新已存榜单的实际版本，两者可能不同；旧快照缺少版本字段时不会补标为新版。
 
 ## 开发与验证
 

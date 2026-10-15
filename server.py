@@ -64,8 +64,9 @@ _HIST = {}
 _HIST_LOCK = threading.Lock()
 
 
-def cached_history(freq, code, bars):
-    key = (freq, DS.to_symbol(code), ST.bars_version(bars))
+def cached_history(freq, code, bars, analysis_version=None):
+    version = analysis_version or E.analysis_identity()["analysis_version"]
+    key = (freq, DS.to_symbol(code), ST.bars_version(bars), version)
     with _HIST_LOCK:
         hit = _HIST.get(key)
     if hit is not None:
@@ -106,6 +107,7 @@ def stock_payload(code, freq="day", lookback=250, with_report=False):
     code = sym[2:]
     freq = DS.validate_freq(freq)
     lookback = integer(lookback, "lookback", 30, 5000)
+    analysis = E.analysis_identity()
 
     cached = True
     bars = ST.load_kline(freq, sym)
@@ -122,7 +124,7 @@ def stock_payload(code, freq="day", lookback=250, with_report=False):
     # 抽屉要展示该级别历史上全部信号段（含已失效）并显示「存活 N 根 / 期内 ±x%」——
     # 只能切片复算，结果按数据版本缓存。榜单（scan.py）不走这条路：那边每只票都算的话
     # 全市场要多花 80 分钟。
-    hist = cached_history(freq, sym, bars)
+    hist = cached_history(freq, sym, bars, analysis_version=analysis["analysis_version"])
     a = E.analyze(bars, unit=DS.UNIT.get(freq, freq), lookback=lookback,
                   with_report=with_report, history=hist)
     if not a:
@@ -149,6 +151,7 @@ def stock_payload(code, freq="day", lookback=250, with_report=False):
         "in_scan": sym in rows,
         "cached": cached,
         "elapsed_ms": int((time.perf_counter() - t0) * 1000),
+        **analysis,
     })
     return a
 
@@ -176,7 +179,9 @@ def start_scan(limit=0, workers=32, freq="day", count=800, lookback=5):
                                        "elapsed": p["elapsed"],
                                        "errors": p["errors"], "complete": p["complete"],
                                        "industry_status": p["industry_status"],
-                                       "generated": p["generated"]}})
+                                       "generated": p["generated"],
+                                       "analysis_version": p["analysis_version"],
+                                       "sell_rules_version": p["sell_rules_version"]}})
         except Exception as e:                               # noqa: BLE001
             with JOB_LOCK:
                 JOB["error"] = "%s: %s" % (type(e).__name__, e)
@@ -284,10 +289,12 @@ class Handler(BaseHTTPRequestHandler):
                 "scan": {"generated": (s or {}).get("generated", ""),
                          "hit": (s or {}).get("hit", 0),
                          "total": (s or {}).get("total_scanned", 0),
-                         "elapsed": (s or {}).get("elapsed", 0)} if s else None,
+                         "elapsed": (s or {}).get("elapsed", 0),
+                         **{field: s[field] for field in ("analysis_version", "sell_rules_version") if field in s}} if s else None,
                 "cached_kline": sum(len(f) for _, _, f in os.walk(os.path.join(CACHE, "kline"))),
                 "job": job, "last_attempt": ST.load_scan_attempt(),
                 "engine": engine_identity(E.K),
+                **E.analysis_identity(),
             })
 
         if p == "/api/scans":

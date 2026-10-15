@@ -233,12 +233,14 @@ function renderStats(t) {
 function renderScanMeta() {
   const newer = snapshots[0]?.id && loadedSnapshot && snapshots[0].id !== loadedSnapshot;
   const label = selectedDate ? '历史扫描' : newer ? '已加载扫描（另有新批次）' : '最新扫描';
+  const sellVersion = typeof D.sell_rules_version === 'string' && D.sell_rules_version.trim() ?
+    D.sell_rules_version : '未记录版本';
   document.getElementById('sub').textContent =
     `${label} ${D.generated}　·　${D.freq || 'day'} ${D.count || 800} 根　·　扫描耗时 ${D.elapsed}s` +
     (D.errors ? `　·　⚠ ${D.errors} 只分析失败，榜单不完整` : '') +
     (D.industry_status?.status === 'failed' ? '　·　⚠ 行业获取失败，请重新扫描' :
       (D.industry_status?.missing ? `　·　⚠ ${D.industry_status.missing} 只缺少行业分类` : '')) +
-    `　·　新鲜度回溯窗口 ${LB} 根　·　买点 chanlun_core.detect()　卖点严格镜像`;
+    `　·　新鲜度回溯窗口 ${LB} 根　·　卖点规则版本 ${sellVersion}`;
 }
 
 function renderFoot() {
@@ -250,12 +252,15 @@ function renderFoot() {
     `分钟线是切过去才向后端要的（现取现算，约 0.3 s）。<br>` +
     `<b>新鲜度</b>：信号「首次可察觉距扫描末根几根」。做法是对最后 ${LB} 根逐根重跑引擎（<code>detect(bars[:i+1])</code>），` +
     `信号第一次出现的那一轮就是它的年龄 —— <b>「当日」= 最后一根 K 线才首次报出</b>，不是「信号日期是今天」。<br>` +
-    `<b>未失效</b>：买点要求现价仍在失效位之上、卖点仍在之下。引擎对一类买点不校验当前价，` +
+    `<b>未失效</b>：买点要求扫描价仍在失效位之上；当前规则的一、二卖允许等于前高，三卖要求严格低于 ZD。历史榜单保留当次扫描的判定。引擎对一类买点不校验当前价，` +
     `报出后价格若跌破本段底、笔端点未确认，信号仍会挂着 —— 那些是「已失效」，默认过滤（标签上仍可见删除线）。<br>` +
-    `口径：一类=背驰 / 二类=回踩不破前低 / 三类=突破中枢上沿回抽不破；卖点为严格镜像。` +
+    `买点口径：一类=背驰 / 二类=回踩不破前低 / 三类=突破中枢上沿回抽不破。` +
+    `当前卖点口径：一卖=相邻两上涨笔创新高且后一笔 MACD 正柱面积严格缩小；` +
+    `二卖=一卖后下跌再反弹，高点≤一卖高点；三卖=跌破中枢下沿 ZD 后反弹高点严格低于 ZD。` +
+    `末端笔可能随行情延伸；历史回放记录当时首次识别时间，不回填到结构顶点。旧榜单以扫描批次所记规则版本为准。` +
     `「趋势背驰」标签 = 中枢回溯链达到 ≥2 个依次下移/上移不重叠的严格缠论趋势要求，<b>只筛这个标签更接近教科书定义的一类买卖点</b>。<br>` +
     `行业为东财 EM2016 一级分类；成交额 = 收盘价 × 成交量（新浪源）。` +
-    `⚠️ 卖点是买点的机械镜像，<b>尚未经过独立的历史胜率统计</b>，请当作结构提示而非已校准信号。`;
+    `买卖点<b>尚未经过独立的历史胜率统计</b>，请当作结构提示而非已校准信号。`;
 }
 
 // ★ 不能叫 redraw：vendor/kline_canvas.js 里已有全局 redraw()（画布重绘），

@@ -84,7 +84,8 @@ def run_scan(limit=0, freq="day", count=800, lookback=5, workers=32,
     options = validate_options(limit, workers, freq, count, lookback)
     attempt = {"generated": time.strftime("%Y-%m-%d %H:%M:%S"),
                "status": "running", "stage": "list", "total_scanned": 0,
-               "errors": 0, "error_details": [], "skipped": {"no_signal": 0, "insufficient_bars": 0}}
+               "errors": 0, "error_details": [], "skipped": {"no_signal": 0, "insufficient_bars": 0},
+               **E.analysis_identity()}
     try:
         payload = _run_scan(**options, progress=progress, cache_kline=cache_kline, attempt=attempt)
         attempt.update(status="published", hit=payload["hit"], complete=payload["complete"])
@@ -178,6 +179,8 @@ def _run_scan(limit, freq, count, lookback, workers, progress, cache_kline, atte
         "source": DS.PROVENANCE,
         "elapsed": round(time.perf_counter() - t0, 1),
         "rows": rows,
+        "analysis_version": attempt["analysis_version"],
+        "sell_rules_version": attempt["sell_rules_version"],
     }
     say("save", 0, 0, "落盘…")
     ST.save_scan(payload)

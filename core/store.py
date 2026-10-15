@@ -338,9 +338,13 @@ def _scan_metadata(stamp, payload):
     generated = payload.get("generated")
     if _generated_stamp(generated) is None:
         generated = datetime.strptime(stamp[:15], "%Y%m%d-%H%M%S").strftime("%Y-%m-%d %H:%M:%S")
-    return {"id": stamp, "generated": generated, "date": generated[:10],
-            "freq": payload.get("freq", "day"), "hit": payload.get("hit", len(payload["rows"])),
-            "total_scanned": payload.get("total_scanned", 0)}
+    metadata = {"id": stamp, "generated": generated, "date": generated[:10],
+                "freq": payload.get("freq", "day"), "hit": payload.get("hit", len(payload["rows"])),
+                "total_scanned": payload.get("total_scanned", 0)}
+    for field in ("analysis_version", "sell_rules_version"):
+        if isinstance(payload.get(field), str) and payload[field]:
+            metadata[field] = payload[field]
+    return metadata
 
 
 def save_scan_attempt(payload):
