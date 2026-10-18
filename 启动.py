@@ -44,7 +44,7 @@ def main():
         return
 
     print("=" * 56)
-    print(" 缠论工作台")
+    print(" 缠论全市场扫描")
     print(" 目录: %s" % HERE)
     print(" 地址: %s" % url)
     print(" 停止: 在本窗口按 Ctrl+C")

@@ -1,13 +1,13 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""缠论工作台 —— 本地服务。
+"""缠论全市场扫描 —— 本地服务。
 
 **为什么必须是服务**：「点开个股后再算 60 / 30 分钟」意味着浏览器要能实时向后端要数据。
 静态 HTML 用 file:// 打开时 fetch 会被同源策略挡掉，做不到按需计算。
-所以工作台从「一个 HTML 文件」变成「一个本地服务 + 一组 API」。
+所以应用从「一个 HTML 文件」变成「一个本地服务 + 一组 API」。
 
 端点:
-    GET  /                        工作台页面（web/index.html）
+    GET  /                        全市场扫描页面（web/index.html）
     GET  /<静态资源>               web/ 下的 css / js / vendor
     GET  /api/health               服务与数据状态
     GET  /api/scan?snapshot=       最新或指定历史扫描结果
@@ -388,7 +388,7 @@ def main():
 
     srv = ThreadingHTTPServer((a.host, a.port), Handler)
     url = "http://%s:%d/" % (a.host, a.port)
-    print("缠论工作台已启动 → %s" % url)
+    print("缠论全市场扫描已启动 → %s" % url)
     s = ST.load_scan()
     print("  扫描数据: %s" % (("%s（命中 %d / %d）" % (s["generated"], s["hit"], s["total_scanned"]))
                               if s else "无 —— 打开页面后点「重新扫描」"))
