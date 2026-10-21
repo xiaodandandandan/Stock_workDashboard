@@ -24,7 +24,6 @@ import urllib.request
 from urllib.parse import urlencode
 from datetime import datetime
 
-from . import SKILLS  # noqa: F401  （保持包初始化顺序：技能路径先注入）
 from .validation import InputError, integer, market_prefix, to_symbol
 
 CTX = ssl.create_default_context()

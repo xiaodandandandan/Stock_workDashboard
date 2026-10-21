@@ -20,14 +20,11 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CACHE = os.path.join(ROOT, "cache")
 WEB = os.path.join(ROOT, "web")
 
-# External engine lookup: explicit configuration, bundled copy, then personal skills.
+# Engine lookup: an explicit override, otherwise the bundled copy.
 # Use CHANLUN_ENGINE_SHA256 to keep a reviewed version instead of silently following upgrades.
-SKILLS = os.path.join(os.path.expanduser("~"), ".workbuddy", "skills")
-CHANLUN_DIR = os.path.join(SKILLS, "chanlun-kline", "scripts")
-BRIDGE_DIR = os.path.join(SKILLS, "astock-chanlun-bridge", "scripts")
 ENGINE_DIR = os.environ.get("CHANLUN_ENGINE_DIR")
 BUNDLED_ENGINE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_engine")
-ENGINE_PATHS = [p for p in (ENGINE_DIR, BUNDLED_ENGINE_DIR, CHANLUN_DIR, BRIDGE_DIR) if p]
+ENGINE_PATHS = [p for p in (ENGINE_DIR, BUNDLED_ENGINE_DIR) if p]
 
 for _p in reversed(ENGINE_PATHS):
     if os.path.isdir(_p) and _p not in sys.path:
@@ -48,7 +45,7 @@ def engine_hint():
     looked = "\n".join("    %s" % p for p in ENGINE_PATHS)
     return (
         "找不到缠论引擎 chanlun_core.py，已查找：\n%s\n"
-        "把它（或整个 chanlun-kline/scripts 目录）放进上面的任一目录，\n"
+        "请恢复项目 core/_engine/ 内的引擎文件，\n"
         "或设环境变量 CHANLUN_ENGINE_DIR 指向存放它的目录。" % looked
     )
 

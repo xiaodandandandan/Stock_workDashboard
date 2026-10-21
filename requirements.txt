@@ -1,0 +1,2 @@
+# Runtime uses Python 3.10+ standard library only.
+# Chan analysis and text-report modules are bundled in core/_engine/.

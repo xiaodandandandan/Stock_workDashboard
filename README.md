@@ -4,7 +4,7 @@
 
 后端使用 Python 标准库，前端使用原生 JavaScript 和 Canvas。页面无需构建；开发时通过 JSDoc、TypeScript 检查和回归测试约束关键接口。
 
-> **运行前须知：** 本仓库不包含缠论核心引擎 `chanlun_core.py`，需要自行提供兼容的引擎文件。只克隆仓库还不能直接启动。
+> **开箱运行：** 仓库已包含缠论核心引擎及文字报告依赖，日常运行只需 Python 标准库，无需安装 WorkBuddy 技能包或额外的 Python 库。
 
 ## 可以做什么
 
@@ -24,7 +24,7 @@
 | 项目 | 要求 |
 | --- | --- |
 | Python | 3.10 或更高版本 |
-| 缠论引擎 | 兼容的 `chanlun_core.py` 及其依赖，自行提供 |
+| 缠论引擎 | 已内置于 `core/_engine/`，无需另行安装 |
 | 浏览器 | 支持 Canvas 和 Fetch 的现代浏览器 |
 | 网络 | 服务进程能够通过 HTTPS 访问新浪、东方财富和腾讯行情接口 |
 | Node.js | 仅开发检查需要，20 或更高版本；日常运行不需要 |
@@ -34,30 +34,27 @@ git clone https://github.com/xiaodandandandan/Stock_workDashboard.git
 cd Stock_workDashboard
 ```
 
-### 2. 配置引擎
+### 2. 内置引擎与可选覆盖
 
-推荐通过 `CHANLUN_ENGINE_DIR` 指向引擎所在目录。目录内应直接包含 `chanlun_core.py`。
+默认使用项目内 `core/_engine/chanlun_core.py`，文字报告适配器也在同目录。克隆后可以直接启动，删除本机技能包不会影响本项目。来源、校验值及适配说明见 [引擎来源说明](core/_engine/NOTICE.md)。
 
-Windows PowerShell：
+只有需要替换引擎时才设置 `CHANLUN_ENGINE_DIR`，目录内应直接包含兼容的 `chanlun_core.py`。恢复内置版本时，在启动服务的终端清除原覆盖配置：
 
 ```powershell
-$env:CHANLUN_ENGINE_DIR = 'D:\chanlun-engine'
+Remove-Item Env:CHANLUN_ENGINE_DIR -ErrorAction SilentlyContinue
 ```
 
 macOS / Linux：
 
 ```bash
-export CHANLUN_ENGINE_DIR="$HOME/chanlun-engine"
+unset CHANLUN_ENGINE_DIR
 ```
 
-也可以把引擎放到项目的 `core/_engine/` 目录。程序的查找优先级为：
+程序的查找优先级为：
 
 1. `CHANLUN_ENGINE_DIR` 指定的目录。
 2. 项目内的 `core/_engine/`。
-3. `~/.workbuddy/skills/chanlun-kline/scripts/`。
-4. `~/.workbuddy/skills/astock-chanlun-bridge/scripts/`。
-
-展开“文字报告”还需要 `run_chanlun.py` 及其依赖；缺少报告模块不会影响扫描和图表。
+不再自动搜索个人技能目录；文字报告使用已内置的 `run_chanlun.py`。若曾设置 `CHANLUN_ENGINE_SHA256`，其值必须与所选引擎一致。
 
 ### 3. 启动服务
 
@@ -160,7 +157,7 @@ python scan.py --freq m60 --count 800        # 扫描 60 分钟周期
 | 基本面估值 | 腾讯行情的市盈率 TTM、市净率与市值读数 |
 | 公司公告与媒体新闻 | 东方财富公告与新闻检索，分开记录覆盖状态、发布时间及来源 |
 | 估算成交额 | 收盘价 × 成交量，再换算为亿元；不是逐笔成交金额之和 |
-| 买点 | 外部引擎 `chanlun_core.detect()` |
+| 买点 | 内置引擎 `core/_engine/chanlun_core.py` 的 `detect()` |
 | 卖点 | 项目内 `core/sell.py`，按下述独立规则识别 |
 
 行业列表展示一级分类，例如“金融”“交运设备”；接口还保留完整分类路径。
@@ -302,7 +299,7 @@ python -B -m unittest discover -s tests -v
 
 当前严格类型检查覆盖 `web/js/api.js` 与 `web/js/state.js`。前端测试覆盖异步请求、周期切换、抽屉状态和图表窗口；后端测试覆盖缓存、参数、分页、行业匹配、扫描发布和静态路径边界。
 
-后端测试使用明确标注的测试引擎替身，无需安装外部引擎，但不能据此判断真实缠论算法或历史收益。Windows 没有符号链接权限时会跳过对应测试，Linux CI 执行该测试。
+后端接口测试使用明确标注的测试引擎替身；内置引擎测试另用隔离 Python 子进程运行真实结构分析和文字报告，并验证不访问个人技能目录。测试通过不能据此判断策略历史收益。Windows 没有符号链接权限时会跳过对应测试，Linux CI 执行该测试。
 
 ### 图表库许可
 
@@ -356,7 +353,7 @@ python -c "from core import require_engine, engine_identity; print(engine_identi
 | 凌晨扫描到收盘的累计涨跌看起来为 0 或未显示 | 核对是否选择了凌晨的具体批次；同日收盘后的新批次已用当日末价为基准。检查当前最新价及行情状态，报价未获取时显示“—”而非 0% |
 | 基本面资料缺失或过旧 | 检查各区的数据时间、来源状态和原文，尝试强制刷新；无资料或标题不明确时保留待核验 |
 | 端口已被占用 / 打开的是旧版本 | 停止原服务或使用 `--port 8766`，再打开对应端口 |
-| 文字报告失败，但图表正常 | 检查可选的 `run_chanlun.py` 及其依赖 |
+| 文字报告失败，但图表正常 | 检查 `core/_engine/run_chanlun.py` 是否完整及是否设置了外部引擎覆盖 |
 | 更新代码后页面仍是旧内容 | 重启 Python 服务并刷新浏览器；需要更新数据时再运行扫描 |
 
 本项目用于行情研究与结构复盘，不提供自动交易。信号未经独立的策略收益验证，不构成投资建议。
