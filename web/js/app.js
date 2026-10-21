@@ -20,7 +20,7 @@ const CLS = {
   '一类卖点': 's1', '二类卖点': 's2', '三类卖点': 's3', '中枢跌破': 'sx',
 };
 const AMTLABEL = { 0: '不限', 1: '1亿', 3: '3亿', 5: '5亿', 10: '10亿', 20: '20亿', 50: '50亿' };
-const BOARD_LABELS = { '': '全部板块', main: '主板（沪深）', star: '科创板' };
+const BOARD_LABELS = { '': '全部板块', main: '主板（沪深）', star: '科创板', growth: '创业板' };
 
 let LB = 5;                                    // boot() 里按后端返回的 lookback 更新
 const S = {
@@ -86,6 +86,7 @@ function basePass(r) {
   const market = mkt(r.code);
   if (S.board === 'main' && market !== '沪主板' && market !== '深主板') return false;
   if (S.board === 'star' && market !== '科创') return false;
+  if (S.board === 'growth' && market !== '创业') return false;
   if (S.ind && r.industry !== S.ind) return false;
   if (S.exclST && /ST/i.test(r.name)) return false;
   if (S.exclBJ && market === '北交所') return false;
