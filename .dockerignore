@@ -1,0 +1,9 @@
+*
+!core/
+!core/**
+!web/
+!web/**
+!server.py
+!scan.py
+**/__pycache__/
+**/*.pyc

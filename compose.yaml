@@ -1,0 +1,46 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    init: true
+    volumes:
+      - scan_cache:/app/cache
+    mem_limit: 2g
+    cpus: 2
+    logging:
+      options:
+        max-size: 10m
+        max-file: '3'
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8766/api/health', timeout=10).read()"]
+      interval: 60s
+      timeout: 15s
+      start_period: 20s
+      retries: 3
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    environment:
+      SITE_DOMAIN: ${SITE_DOMAIN:?请在.env中填写域名}
+      ACME_EMAIL: ${ACME_EMAIL:?请在.env中填写证书通知邮箱}
+      SITE_USER: ${SITE_USER:-owner}
+      SITE_PASSWORD_HASH: ${SITE_PASSWORD_HASH:?请先生成密码哈希}
+    ports:
+      - '80:80'
+      - '443:443'
+      - '443:443/udp'
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      app:
+        condition: service_healthy
+    logging:
+      options:
+        max-size: 10m
+        max-file: '3'
+volumes:
+  scan_cache:
+  caddy_data:
+  caddy_config:

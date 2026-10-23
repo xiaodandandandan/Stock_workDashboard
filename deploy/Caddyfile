@@ -1,0 +1,28 @@
+{
+    email {$ACME_EMAIL}
+}
+
+{$SITE_DOMAIN} {
+    encode zstd gzip
+    @crossOrigin {
+        method POST
+        header Origin *
+        not header Origin https://{$SITE_DOMAIN}
+    }
+    respond @crossOrigin "Cross-origin request denied" 403
+    request_body {
+        max_size 8KB
+    }
+    basic_auth {
+        {$SITE_USER} {$SITE_PASSWORD_HASH}
+    }
+    header {
+        X-Content-Type-Options nosniff
+        Referrer-Policy same-origin
+    }
+    reverse_proxy app:8766 {
+        transport http {
+            response_header_timeout 180s
+        }
+    }
+}
