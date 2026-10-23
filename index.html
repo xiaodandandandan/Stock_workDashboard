@@ -6,6 +6,20 @@
 <section><label>扫描批次 <select id="batch"></select></label><label>上市板块 <select id="board"><option value="">全部板块</option><option value="main">主板（沪深）</option><option value="star">科创板</option><option value="growth">创业板</option><option value="bse">北交所</option></select></label><label>信号 <select id="signal"><option value="">全部信号</option><option>一类买点</option><option>二类买点</option><option>三类买点</option><option>一类卖点</option><option>二类卖点</option><option>三类卖点</option></select></label><label>新鲜度 <select id="fresh"><option value="99">不限</option><option value="0">仅当日新报出</option><option value="1">近2根K线</option><option value="4">近5根K线</option></select></label><label>行业 <select id="industry"><option value="">全部行业</option></select></label><label>搜索 <input id="query" placeholder="代码或名称"></label><label><input id="valid" type="checkbox" checked>扫描时未失效</label><div class="hint" id="count"></div></section>
 <section class="scroll"><table><thead><tr><th>代码</th><th>名称</th><th>扫描时信号</th><th>扫描价</th><th>行业</th><th>信号结构日期</th><th>关键位</th><th>估算成交额（亿）</th></tr></thead><tbody id="rows"></tbody></table></section><small>点击个股查看保存的信号判据。新鲜度以扫描当时首次识别为准，不是距今天数。价格和信号不会自动更新。本站公开展示最近最多14个已导出批次。</small></main>
 <dialog id="detail"><button id="close">关闭</button><h2 id="title"></h2><pre id="reason"></pre></dialog>
+<style>
+*{box-sizing:border-box}body{overflow-wrap:anywhere}main{min-width:0}select,input,button{font-size:16px;min-height:42px}label{max-width:100%}input[type=checkbox]{min-height:0;width:18px;height:18px;vertical-align:middle}#batch{max-width:100%}dialog{max-height:85vh;overflow:auto}pre{font:14px/1.7 system-ui}
+@media(max-width:640px){
+body{padding:12px;font-size:14px}h1{font-size:22px;margin:12px 0}section{padding:14px;margin:12px 0;border-radius:12px}
+main>section:nth-of-type(2){display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px}
+label{margin:0;display:flex;flex-direction:column;gap:6px;min-width:0}label:first-child{grid-column:1/-1}label:has(input[type=checkbox]){grid-column:1/-1;flex-direction:row;align-items:center}
+select,input{width:100%;min-width:0;padding:10px 8px;background:white;color:#243047}#count{grid-column:1/-1;line-height:1.6}
+.scroll{overflow:visible;padding:0;background:transparent}table,tbody{display:block;width:100%;white-space:normal}thead{display:none}
+tr[data-row]{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px 14px;background:white;border:1px solid #e1e6ef;border-radius:12px;padding:14px;margin:0 0 12px;box-shadow:0 2px 6px #24304706}
+td{display:block;min-width:0;padding:0;border:0;text-align:left;line-height:1.5}td:before{display:block;font-size:12px;color:#68758c;margin-bottom:3px}td:nth-child(1){font-weight:600;color:#53627a}td:nth-child(2){font-size:17px;font-weight:650}td:nth-child(3){grid-column:1/-1;color:#236055;background:#f0f7f4;border-radius:6px;padding:8px}td:nth-child(3):before{content:'扫描时信号'}td:nth-child(4):before{content:'扫描价'}td:nth-child(5):before{content:'行业'}td:nth-child(6):before{content:'信号结构日期'}td:nth-child(7):before{content:'关键位'}td:nth-child(8):before{content:'估算成交额（亿）'}
+dialog{width:calc(100% - 24px);padding:16px}small{display:block;padding:4px 2px 16px}
+}
+@media(max-width:340px){main>section:nth-of-type(2){grid-template-columns:minmax(0,1fr)}}
+</style>
 <script>
 const $=id=>document.getElementById(id);let data={rows:[]},catalog=[],shown=[],generation=0;
 function board(code){return /^30/.test(code)?'growth':/^68/.test(code)?'star':/^(60|00)/.test(code)?'main':/^(92|8|4)/.test(code)?'bse':''}
