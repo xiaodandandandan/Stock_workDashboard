@@ -2,7 +2,7 @@
   "name": "stock-workdashboard",
   "private": true,
   "scripts": {
-    "test": "node --test tests/frontend.test.cjs",
+    "test": "node --test tests/frontend.test.cjs tests/pages-chart.test.cjs",
     "typecheck": "tsc -p tsconfig.json"
   },
   "engines": { "node": ">=20" },
