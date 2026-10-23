@@ -3,6 +3,7 @@ import argparse
 import json
 import re
 import shutil
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,9 +43,37 @@ def export(destination, cache=None):
     if not snapshots:
         raise ValueError('没有可导出的扫描结果')
     (data / 'index.json').write_text(json.dumps(snapshots, ensure_ascii=False), encoding='utf-8')
+    sys.path.insert(0, str(ROOT))
+    from core import engine, store
+    chart_dir = destination / 'charts'
+    chart_dir.mkdir(exist_ok=True)
+    symbols = set()
+    for item in snapshots:
+        snapshot = json.loads((destination / item['file']).read_text(encoding='utf-8'))
+        for row in snapshot['rows']:
+            code = row['code']
+            if re.fullmatch(r'\d{6}', str(code)):
+                symbols.add(code)
+    available = {}
+    for code in sorted(symbols):
+        symbol = ('sh' if code.startswith(('6', '5')) else 'sz' if code.startswith(('0', '1', '2', '3')) else 'bj') + code
+        bars = store.load_kline('day', symbol, max_age=10**12)
+        if not bars or len(bars) < 40:
+            continue
+        result = engine.analyze(bars, lookback=250)
+        if not result:
+            continue
+        payload = {key: result[key] for key in ('date', 'chart', 'signals', 'bars')}
+        payload['symbol'] = symbol
+        (chart_dir / (code + '.json')).write_text(json.dumps(payload, ensure_ascii=False, separators=(',', ':')), encoding='utf-8')
+        available[code] = result['date']
+    (chart_dir / 'index.json').write_text(json.dumps(available), encoding='utf-8')
+    shutil.copyfile(ROOT / 'web/vendor/kline_canvas.js', destination / 'kline_canvas.js')
+    shutil.copyfile(ROOT / 'deploy/pages-chart.js', destination / 'pages-chart.js')
     shutil.copyfile(ROOT / 'deploy/pages.html', destination / 'index.html')
     (destination / '.nojekyll').touch()
     print('Exported %d snapshots to %s' % (len(snapshots), destination))
+    print('Exported %d cached daily charts (no network fetch)' % len(available))
 
 
 if __name__ == '__main__':
